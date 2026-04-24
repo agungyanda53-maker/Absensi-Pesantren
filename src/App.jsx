@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import jsQR from "jsqr";
 
 const DURATION = 15 * 60;
 const KEGIATAN = [
@@ -63,6 +64,12 @@ export default function AbsensiPesantren() {
   const [sortBy, setSortBy] = useState("nama");
   const [savedNotif, setSavedNotif] = useState(false);
   const [santriDB, setSantriDB] = useState([]);
+  const [kameraAktif, setKameraAktif] = useState(false);
+  const [kameraError, setKameraError] = useState(null);
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const scanLoopRef = useRef(null);
+  const streamRef = useRef(null);
   const [dbStatus, setDbStatus] = useState("loading"); // loading | ok | error
   const inputRef = useRef(null);
   const intervalRef = useRef(null);
@@ -127,6 +134,80 @@ export default function AbsensiPesantren() {
     setSavedNotif(true);
     setTimeout(() => setSavedNotif(false), 2500);
   };
+
+  // ── Kamera QR Scanner ──
+  const startKamera = async () => {
+    setKameraError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play();
+      }
+      setKameraAktif(true);
+      scanLoopRef.current = setInterval(() => scanFrame(), 300);
+    } catch (err) {
+      setKameraError("Izin kamera ditolak atau kamera tidak tersedia. Gunakan input manual.");
+    }
+  };
+
+  const stopKamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+    if (scanLoopRef.current) {
+      clearInterval(scanLoopRef.current);
+      scanLoopRef.current = null;
+    }
+    setKameraAktif(false);
+  };
+
+  const scanFrame = () => {
+    if (!videoRef.current || !canvasRef.current) return;
+    const video = videoRef.current;
+    if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
+    if (code && code.data) {
+      prosesKode(code.data.trim().toUpperCase());
+    }
+  };
+
+  const prosesKode = (val) => {
+    const santri = santriDB.find(s => s.qr === val || s.id === val);
+    if (!santri) {
+      setFlash("err");
+      setLastScan({ nama: val, status: "Tidak Ditemukan ❌" });
+      setTimeout(() => setFlash(null), 1200);
+      return;
+    }
+    if (hadir[santri.id]) {
+      setFlash("dup");
+      setLastScan({ nama: santri.nama, status: "Sudah Absen ⚠️" });
+      setTimeout(() => setFlash(null), 1200);
+      return;
+    }
+    const waktu = nowTime();
+    setHadir(prev => ({ ...prev, [santri.id]: waktu }));
+    setLogs(prev => [{ ...santri, waktu }, ...prev]);
+    setFlash("ok");
+    setLastScan({ nama: santri.nama, status: `Hadir ✅ — ${waktu}` });
+    setTimeout(() => setFlash(null), 1200);
+  };
+
+  // Stop kamera saat keluar dari sesi
+  useEffect(() => {
+    if (screen !== "sesi") stopKamera();
+  }, [screen]);
 
   const handleScan = (e) => {
     if (e.key !== "Enter") return;
@@ -364,23 +445,90 @@ export default function AbsensiPesantren() {
                 </div>
               ))}
             </div>
+            {/* AREA KAMERA */}
             <div style={{...card,padding:13,marginBottom:10}}>
-              <div style={{fontSize:11,color:"#94a3b8",marginBottom:5}}>📷 Scan QR Santri</div>
-              <input ref={inputRef} type="text" value={scanInput} onChange={e=>setScanInput(e.target.value)} onKeyDown={handleScan}
-                placeholder="QR-0001 lalu Enter..."
-                style={{width:"100%",padding:"10px 11px",borderRadius:8,background:"rgba(255,255,255,0.06)",
-                  border:"1px solid rgba(255,255,255,0.12)",color:"#f8fafc",fontSize:12,boxSizing:"border-box"}}/>
+              <div style={{fontSize:11,color:"#94a3b8",marginBottom:8,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                <span>📷 Scan QR Santri</span>
+                {kameraAktif && <span style={{fontSize:10,color:"#4ade80",fontWeight:600}}>● KAMERA AKTIF</span>}
+              </div>
+
+              {/* Viewfinder kamera */}
+              <div style={{position:"relative",borderRadius:10,overflow:"hidden",background:"#000",
+                marginBottom:10,aspectRatio:"4/3",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                <video ref={videoRef} playsInline muted
+                  style={{width:"100%",height:"100%",objectFit:"cover",display:kameraAktif?"block":"none"}}/>
+                <canvas ref={canvasRef} style={{display:"none"}}/>
+
+                {/* Overlay garis pemandu QR */}
+                {kameraAktif && (
+                  <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
+                    <div style={{width:180,height:180,position:"relative"}}>
+                      {[{top:0,left:0},{top:0,right:0},{bottom:0,left:0},{bottom:0,right:0}].map((pos,i)=>(
+                        <div key={i} style={{position:"absolute",width:30,height:30,...pos,
+                          borderTop:pos.top===0?"3px solid #4ade80":"none",
+                          borderBottom:pos.bottom===0?"3px solid #4ade80":"none",
+                          borderLeft:pos.left===0?"3px solid #4ade80":"none",
+                          borderRight:pos.right===0?"3px solid #4ade80":"none"}}/>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Placeholder saat kamera belum aktif */}
+                {!kameraAktif && (
+                  <div style={{textAlign:"center",padding:20}}>
+                    <div style={{fontSize:40,marginBottom:8}}>📷</div>
+                    <div style={{color:"#475569",fontSize:12}}>Kamera belum aktif</div>
+                    {kameraError && <div style={{color:"#f87171",fontSize:11,marginTop:6}}>{kameraError}</div>}
+                  </div>
+                )}
+              </div>
+
+              {/* Tombol kamera */}
+              {!kameraAktif ? (
+                <button onClick={startKamera} style={{width:"100%",padding:"11px",
+                  background:"linear-gradient(135deg,#22c55e,#16a34a)",border:"none",
+                  borderRadius:9,color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer",
+                  boxShadow:"0 4px 14px rgba(34,197,94,0.3)",marginBottom:8}}>
+                  📷 Buka Kamera & Mulai Scan
+                </button>
+              ) : (
+                <button onClick={stopKamera} style={{width:"100%",padding:"11px",
+                  background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.3)",
+                  borderRadius:9,color:"#f87171",fontSize:13,fontWeight:600,cursor:"pointer",marginBottom:8}}>
+                  ⏸ Tutup Kamera
+                </button>
+              )}
+
+              {/* Feedback scan terakhir */}
               {lastScan && (
-                <div style={{marginTop:7,padding:"7px 11px",borderRadius:7,fontSize:12,
-                  background:flash==="ok"?"rgba(34,197,94,0.1)":flash==="dup"?"rgba(250,204,21,0.1)":"rgba(248,113,113,0.1)",
-                  border:`1px solid ${flash==="ok"?"rgba(34,197,94,0.3)":flash==="dup"?"rgba(250,204,21,0.3)":"rgba(248,113,113,0.3)"}`}}>
+                <div style={{padding:"9px 12px",borderRadius:8,fontSize:13,marginBottom:8,
+                  background:flash==="ok"?"rgba(34,197,94,0.12)":flash==="dup"?"rgba(250,204,21,0.12)":"rgba(248,113,113,0.12)",
+                  border:`1px solid ${flash==="ok"?"rgba(34,197,94,0.35)":flash==="dup"?"rgba(250,204,21,0.35)":"rgba(248,113,113,0.35)"}`}}>
                   <strong>{lastScan.nama}</strong> — {lastScan.status}
                 </div>
               )}
-              <button onClick={simulateScan} style={{marginTop:7,width:"100%",padding:"8px",background:"rgba(99,102,241,0.15)",
-                border:"1px solid rgba(99,102,241,0.3)",borderRadius:7,color:"#a5b4fc",fontSize:11,cursor:"pointer"}}>
-                🎲 Simulasi Scan Acak (Demo)
-              </button>
+
+              {/* Input manual sebagai backup */}
+              <details style={{marginTop:4}}>
+                <summary style={{fontSize:11,color:"#64748b",cursor:"pointer",userSelect:"none"}}>
+                  ✏️ Input kode manual (jika kamera tidak bisa)
+                </summary>
+                <div style={{marginTop:8,display:"flex",gap:7}}>
+                  <input ref={inputRef} type="text" value={scanInput}
+                    onChange={e=>setScanInput(e.target.value)} onKeyDown={handleScan}
+                    placeholder="QR-0001 lalu Enter..."
+                    style={{flex:1,padding:"9px 11px",borderRadius:8,background:"rgba(255,255,255,0.06)",
+                      border:"1px solid rgba(255,255,255,0.12)",color:"#f8fafc",fontSize:12}}/>
+                  <button onClick={()=>{if(scanInput.trim()){prosesKode(scanInput.trim().toUpperCase());setScanInput("");}}}
+                    style={{padding:"9px 14px",borderRadius:8,background:"rgba(99,102,241,0.2)",
+                      border:"1px solid rgba(99,102,241,0.3)",color:"#a5b4fc",fontSize:12,cursor:"pointer"}}>OK</button>
+                </div>
+                <button onClick={simulateScan} style={{marginTop:6,width:"100%",padding:"7px",background:"rgba(99,102,241,0.1)",
+                  border:"1px solid rgba(99,102,241,0.2)",borderRadius:7,color:"#818cf8",fontSize:11,cursor:"pointer"}}>
+                  🎲 Simulasi Scan (Demo)
+                </button>
+              </details>
             </div>
             {logs.length > 0 && (
               <div style={{...card,overflow:"hidden",marginBottom:10}}>
