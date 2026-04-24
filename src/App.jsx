@@ -7,23 +7,27 @@ const KEGIATAN = [
   "Kajian Kitab", "Tahfidz", "Muhadharah", "Piket"
 ];
 
-const generateSantri = () => {
-  const kamar = ["Al-Fatih", "Al-Kautsar", "Ar-Rahman", "Al-Ikhlas", "Az-Zahra"];
-  const names = [
-    "Ahmad Fauzi","Rizki Maulana","Bagas Saputra","Daffa Ardiansyah","Eko Prasetyo",
-    "Faiz Nugraha","Ghozali Ramadan","Haikal Pratama","Ilham Zulkifli","Jafar Siddiq",
-    "Siti Aisyah","Fatimah Zahra","Khadijah Nur","Maryam Salwa","Nisa Aulia",
-    "Putri Rahayu","Qonita Syifa","Rania Husna","Sarah Nabila","Taqiyah Mufidah"
-  ];
-  return names.map((name, i) => ({
-    id: `STR-${String(i + 1).padStart(4, "0")}`,
-    nama: name,
-    kamar: kamar[i % kamar.length],
-    qr: `QR-${String(i + 1).padStart(4, "0")}`,
-  }));
-};
+const SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRHyGfi-heXx4sC43HGtLFeWa9ahh-fh1eFPD6k5m-QD2b5M_mWQiSl-bJLkD0cx0MCpJ7mPy5uF8EB/pub?gid=0&single=true&output=csv";
 
-const SANTRI_DB = generateSantri();
+const parseCSV = (text) => {
+  const lines = text.trim().split("
+");
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(",").map(h => h.trim().replace(/
+/g,"").toLowerCase());
+  return lines.slice(1).map(line => {
+    const vals = line.split(",").map(v => v.trim().replace(/
+/g,""));
+    const obj = {};
+    headers.forEach((h, i) => obj[h] = vals[i] || "");
+    return {
+      id: obj.id || obj["id santri"] || `STR-${Math.random().toString(36).slice(2,7)}`,
+      nama: obj.nama || obj["nama santri"] || obj["name"] || "Tanpa Nama",
+      kamar: obj.kamar || obj["kamar/kelas"] || obj["kelas"] || "-",
+      qr: obj.qr_code || obj["qr"] || obj["kode qr"] || obj.id || "",
+    };
+  }).filter(s => s.nama && s.nama !== "Tanpa Nama");
+};
 const STORAGE_KEY = "absensi_pesantren_rekap";
 
 const loadRekap = () => {
@@ -58,8 +62,24 @@ export default function AbsensiPesantren() {
   const [selectedSantri, setSelectedSantri] = useState(null);
   const [sortBy, setSortBy] = useState("nama");
   const [savedNotif, setSavedNotif] = useState(false);
+  const [santriDB, setSantriDB] = useState([]);
+  const [dbStatus, setDbStatus] = useState("loading"); // loading | ok | error
   const inputRef = useRef(null);
   const intervalRef = useRef(null);
+
+  // Fetch data santri dari Google Sheets saat pertama load
+  useEffect(() => {
+    setDbStatus("loading");
+    fetch(SHEETS_CSV_URL)
+      .then(r => r.text())
+      .then(text => {
+        const parsed = parseCSV(text);
+        if (parsed.length === 0) { setDbStatus("error"); return; }
+        setSantriDB(parsed);
+        setDbStatus("ok");
+      })
+      .catch(() => setDbStatus("error"));
+  }, []);
 
   useEffect(() => {
     if (screen !== "sesi") return;
@@ -94,7 +114,7 @@ export default function AbsensiPesantren() {
     const tanggal = new Date().toLocaleDateString("id-ID");
     setRekapTahunan(prev => {
       const updated = { ...prev };
-      SANTRI_DB.forEach(s => {
+      santriDB.forEach(s => {
         if (!updated[s.id]) updated[s.id] = {};
         if (!updated[s.id][tahun]) updated[s.id][tahun] = {};
         if (!updated[s.id][tahun][kegiatan]) updated[s.id][tahun][kegiatan] = { hadir: 0, alpha: 0, riwayat: [] };
@@ -112,7 +132,7 @@ export default function AbsensiPesantren() {
     if (e.key !== "Enter") return;
     const val = scanInput.trim().toUpperCase();
     setScanInput("");
-    const santri = SANTRI_DB.find(s => s.qr === val || s.id === val);
+    const santri = santriDB.find(s => s.qr === val || s.id === val);
     if (!santri) {
       setFlash("err"); setLastScan({ nama: val, status: "Tidak Ditemukan ❌" });
       setTimeout(() => setFlash(null), 800); return;
@@ -129,7 +149,7 @@ export default function AbsensiPesantren() {
   };
 
   const simulateScan = () => {
-    const belum = SANTRI_DB.filter(s => !hadir[s.id]);
+    const belum = santriDB.filter(s => !hadir[s.id]);
     if (!belum.length) return;
     const pick = belum[Math.floor(Math.random() * belum.length)];
     const waktu = nowTime();
@@ -140,9 +160,9 @@ export default function AbsensiPesantren() {
   };
 
   const totalHadir = Object.keys(hadir).length;
-  const totalSantri = SANTRI_DB.length;
+  const totalSantri = santriDB.length;
   const persen = Math.round((totalHadir / totalSantri) * 100);
-  const alpha = SANTRI_DB.filter(s => !hadir[s.id]);
+  const alpha = santriDB.filter(s => !hadir[s.id]);
   const timerPct = (timer / DURATION) * 100;
   const timerColor = timer > 300 ? "#4ade80" : timer > 120 ? "#facc15" : "#f87171";
 
@@ -159,7 +179,7 @@ export default function AbsensiPesantren() {
 
   const downloadCSV = () => {
     const rows = [["ID","Nama","Kamar","Status","Waktu Hadir","Kegiatan","Tanggal"]];
-    SANTRI_DB.forEach(s => rows.push([s.id,s.nama,s.kamar,hadir[s.id]?"Hadir":"Alpha",hadir[s.id]||"-",kegiatan,new Date().toLocaleDateString("id-ID")]));
+    santriDB.forEach(s => rows.push([s.id,s.nama,s.kamar,hadir[s.id]?"Hadir":"Alpha",hadir[s.id]||"-",kegiatan,new Date().toLocaleDateString("id-ID")]));
     const blob = new Blob([rows.map(r=>r.join(",")).join("\n")], { type: "text/csv" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
     a.download = `absensi-${kegiatan.replace(/ /g,"_")}-${Date.now()}.csv`; a.click();
@@ -180,7 +200,7 @@ export default function AbsensiPesantren() {
   const downloadCSVTahunan = () => {
     const tahun = thisYear();
     const rows = [["ID","Nama","Kamar","Kegiatan","Total Sesi","Hadir","Alpha","Persentase"]];
-    SANTRI_DB.forEach(s => {
+    santriDB.forEach(s => {
       const data = rekapTahunan[s.id]?.[tahun] || {};
       Object.entries(data).forEach(([kg, val]) => {
         const tot = val.hadir + val.alpha;
@@ -193,9 +213,9 @@ export default function AbsensiPesantren() {
     a.download = `rekap-tahunan-${tahun}.csv`; a.click();
   };
 
-  const kamarList = ["Semua", ...new Set(SANTRI_DB.map(s => s.kamar))];
+  const kamarList = ["Semua", ...new Set(santriDB.map(s => s.kamar))];
   const kegiatanList = ["Semua", ...KEGIATAN];
-  const santriFiltered = SANTRI_DB
+  const santriFiltered = santriDB
     .filter(s => filterKamar === "Semua" || s.kamar === filterKamar)
     .filter(s => searchQuery === "" || s.nama.toLowerCase().includes(searchQuery.toLowerCase()) || s.id.toLowerCase().includes(searchQuery.toLowerCase()))
     .map(s => ({ ...s, stat: getStatSantri(s.id, thisYear(), filterKegiatan) }))
@@ -244,8 +264,26 @@ export default function AbsensiPesantren() {
               <h1 style={{ fontSize:22, fontWeight:800, color:"#f8fafc", margin:"0 0 5px" }}>Absensi Digital Pesantren</h1>
               <p style={{ color:"#64748b", fontSize:12, margin:0 }}>Sistem absensi QR Code — cepat, akurat, otomatis</p>
             </div>
+
+            {/* Status koneksi Google Sheets */}
+            {dbStatus === "loading" && (
+              <div style={{ padding:"10px 14px", background:"rgba(250,204,21,0.08)", border:"1px solid rgba(250,204,21,0.2)", borderRadius:10, marginBottom:14, fontSize:12, color:"#fde68a", textAlign:"center" }}>
+                ⏳ Memuat data santri dari Google Sheets...
+              </div>
+            )}
+            {dbStatus === "error" && (
+              <div style={{ padding:"10px 14px", background:"rgba(239,68,68,0.08)", border:"1px solid rgba(239,68,68,0.2)", borderRadius:10, marginBottom:14, fontSize:12, color:"#fca5a5" }}>
+                ⚠️ <strong>Gagal memuat data santri.</strong> Pastikan Google Sheets sudah dipublish dan koneksi internet aktif. <button onClick={()=>{setDbStatus("loading");fetch(SHEETS_CSV_URL).then(r=>r.text()).then(t=>{const p=parseCSV(t);if(p.length){setSantriDB(p);setDbStatus("ok");}else setDbStatus("error");}).catch(()=>setDbStatus("error"));}} style={{marginLeft:8,padding:"2px 10px",borderRadius:6,background:"rgba(239,68,68,0.2)",border:"1px solid rgba(239,68,68,0.3)",color:"#fca5a5",cursor:"pointer",fontSize:11}}>Coba Lagi</button>
+              </div>
+            )}
+            {dbStatus === "ok" && (
+              <div style={{ padding:"8px 14px", background:"rgba(34,197,94,0.08)", border:"1px solid rgba(34,197,94,0.15)", borderRadius:10, marginBottom:14, fontSize:12, color:"#86efac", textAlign:"center" }}>
+                ✅ Database terhubung — <strong>{santriDB.length} santri</strong> berhasil dimuat dari Google Sheets
+              </div>
+            )}
+
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:9, marginBottom:22 }}>
-              {[{icon:"👥",label:"Total Santri",val:`${totalSantri}`},{icon:"⚡",label:"Durasi Sesi",val:"15 Menit"},{icon:"📤",label:"Rekap",val:"WA + Sheets"}].map((s,i)=>(
+              {[{icon:"👥",label:"Total Santri",val:dbStatus==="ok"?`${santriDB.length}`:"..."},{icon:"⚡",label:"Durasi Sesi",val:"15 Menit"},{icon:"📤",label:"Rekap",val:"WA + Sheets"}].map((s,i)=>(
                 <div key={i} style={{...card, padding:"14px 8px", textAlign:"center"}}>
                   <div style={{fontSize:20,marginBottom:3}}>{s.icon}</div>
                   <div style={{fontSize:16,fontWeight:700,color:"#f8fafc"}}>{s.val}</div>
@@ -421,7 +459,7 @@ export default function AbsensiPesantren() {
           <div>
             <div style={{marginBottom:18}}>
               <h2 style={{fontSize:18,fontWeight:800,color:"#f8fafc",margin:"0 0 3px"}}>📊 Rekap Tahunan Per Santri</h2>
-              <div style={{fontSize:11,color:"#64748b"}}>Tahun {thisYear()} — {SANTRI_DB.length} santri terdaftar</div>
+              <div style={{fontSize:11,color:"#64748b"}}>Tahun {thisYear()} — {santriDB.length} santri terdaftar</div>
             </div>
 
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:9}}>
