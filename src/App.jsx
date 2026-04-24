@@ -1,24 +1,21 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import jsQR from "jsqr";
 
+// ─── Konstanta ─────────────────────────────────────────────────────────────
 const DURATION = 15 * 60;
 const KEGIATAN = [
-  "Sholat Subuh", "Sholat Dzuhur", "Sholat Ashar",
-  "Sholat Maghrib", "Sholat Isya", "Tahajjud",
-  "Kajian Kitab", "Tahfidz", "Muhadharah", "Piket"
+  "Sholat Subuh","Sholat Dzuhur","Sholat Ashar",
+  "Sholat Maghrib","Sholat Isya","Tahajjud",
+  "Kajian Kitab","Tahfidz","Muhadharah","Piket"
 ];
 
 const SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRHyGfi-heXx4sC43HGtLFeWa9ahh-fh1eFPD6k5m-QD2b5M_mWQiSl-bJLkD0cx0MCpJ7mPy5uF8EB/pub?gid=0&single=true&output=csv";
 
 const parseCSV = (text) => {
-  const lines = text.trim().split("
-");
+  const lines = text.trim().split("\n");
   if (lines.length < 2) return [];
-  const headers = lines[0].split(",").map(h => h.trim().replace(/
-/g,"").toLowerCase());
+  const headers = lines[0].split(",").map(h => h.trim().replace(/\r/g,"").toLowerCase());
   return lines.slice(1).map(line => {
-    const vals = line.split(",").map(v => v.trim().replace(/
-/g,""));
+    const vals = line.split(",").map(v => v.trim().replace(/\r/g,""));
     const obj = {};
     headers.forEach((h, i) => obj[h] = vals[i] || "");
     return {
@@ -29,24 +26,203 @@ const parseCSV = (text) => {
     };
   }).filter(s => s.nama && s.nama !== "Tanpa Nama");
 };
-const STORAGE_KEY = "absensi_pesantren_rekap";
 
+// ─── Storage ──────────────────────────────────────────────────────────────
+const STORAGE_KEY = "absensi_pesantren_rekap_v2";
 const loadRekap = () => {
-  try {
-    const raw = sessionStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch { return {}; }
+  try { const r = localStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : {}; }
+  catch { return {}; }
 };
-
 const saveRekap = (data) => {
-  try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch {}
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch {}
 };
 
-const fmt = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
-const nowTime = () => new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
-const todayStr = () => new Date().toLocaleDateString("id-ID", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+// ─── Helpers ─────────────────────────────────────────────────────────────
+const fmt = (s) => `${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
+const nowTime = () => new Date().toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit"});
+const todayStr = () => new Date().toLocaleDateString("id-ID",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
 const thisYear = () => new Date().getFullYear();
 
+// ─── QR Scanner pakai HTML5 native (tanpa library eksternal) ─────────────
+function QRScanner({ onDetected }) {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const animRef = useRef(null);
+  const [status, setStatus] = useState("idle"); // idle | loading | active | error
+  const [errMsg, setErrMsg] = useState("");
+  const [lastCode, setLastCode] = useState("");
+  const lastCodeTime = useRef(0);
+
+  const startCamera = async () => {
+    setStatus("loading");
+    setErrMsg("");
+    try {
+      const constraints = {
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+        setStatus("active");
+        scanLoop();
+      }
+    } catch(err) {
+      let msg = "Tidak dapat membuka kamera.";
+      if (err.name === "NotAllowedError") msg = "Izin kamera ditolak. Klik ikon kunci di address bar browser lalu izinkan kamera.";
+      else if (err.name === "NotFoundError") msg = "Kamera tidak ditemukan di perangkat ini.";
+      else if (err.name === "NotReadableError") msg = "Kamera sedang digunakan aplikasi lain. Tutup aplikasi lain lalu coba lagi.";
+      setErrMsg(msg);
+      setStatus("error");
+    }
+  };
+
+  const scanLoop = () => {
+    if (!videoRef.current || !canvasRef.current) return;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+    const tick = () => {
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        // Gunakan BarcodeDetector API jika tersedia (Chrome/Android)
+        if ("BarcodeDetector" in window) {
+          const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+          detector.detect(canvas).then(codes => {
+            if (codes.length > 0) {
+              const val = codes[0].rawValue;
+              const now = Date.now();
+              if (val !== lastCode || now - lastCodeTime.current > 3000) {
+                setLastCode(val);
+                lastCodeTime.current = now;
+                onDetected(val.trim().toUpperCase());
+              }
+            }
+          }).catch(() => {});
+        }
+      }
+      animRef.current = requestAnimationFrame(tick);
+    };
+    animRef.current = requestAnimationFrame(tick);
+  };
+
+  const stopCamera = () => {
+    if (animRef.current) cancelAnimationFrame(animRef.current);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+    setStatus("idle");
+  };
+
+  useEffect(() => () => stopCamera(), []);
+
+  return (
+    <div style={{ width:"100%" }}>
+      {/* Viewfinder */}
+      <div style={{
+        position:"relative", width:"100%", aspectRatio:"4/3",
+        background:"#000", borderRadius:12, overflow:"hidden",
+        marginBottom:10, border:"2px solid rgba(255,255,255,0.08)"
+      }}>
+        <video
+          ref={videoRef}
+          playsInline autoPlay muted
+          style={{
+            width:"100%", height:"100%", objectFit:"cover",
+            display: status === "active" ? "block" : "none"
+          }}
+        />
+        <canvas ref={canvasRef} style={{ display:"none" }} />
+
+        {/* Garis pemandu QR */}
+        {status === "active" && (
+          <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none" }}>
+            <div style={{ position:"relative", width:200, height:200 }}>
+              {/* 4 sudut */}
+              <div style={{ position:"absolute", top:0, left:0, width:36, height:36, borderTop:"4px solid #4ade80", borderLeft:"4px solid #4ade80", borderRadius:"4px 0 0 0" }}/>
+              <div style={{ position:"absolute", top:0, right:0, width:36, height:36, borderTop:"4px solid #4ade80", borderRight:"4px solid #4ade80", borderRadius:"0 4px 0 0" }}/>
+              <div style={{ position:"absolute", bottom:0, left:0, width:36, height:36, borderBottom:"4px solid #4ade80", borderLeft:"4px solid #4ade80", borderRadius:"0 0 0 4px" }}/>
+              <div style={{ position:"absolute", bottom:0, right:0, width:36, height:36, borderBottom:"4px solid #4ade80", borderRight:"4px solid #4ade80", borderRadius:"0 0 4px 0" }}/>
+              {/* Garis scan animasi */}
+              <div style={{
+                position:"absolute", left:8, right:8, height:2,
+                background:"linear-gradient(90deg, transparent, #4ade80, transparent)",
+                animation:"scanLine 2s linear infinite",
+                top:"50%"
+              }}/>
+            </div>
+            <style>{`@keyframes scanLine { 0%{top:10%} 50%{top:90%} 100%{top:10%} }`}</style>
+          </div>
+        )}
+
+        {/* Placeholder saat belum aktif */}
+        {status === "idle" && (
+          <div style={{ position:"absolute", inset:0, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" }}>
+            <div style={{ fontSize:48, marginBottom:10 }}>📷</div>
+            <div style={{ color:"#475569", fontSize:13 }}>Kamera belum aktif</div>
+          </div>
+        )}
+
+        {/* Loading */}
+        {status === "loading" && (
+          <div style={{ position:"absolute", inset:0, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" }}>
+            <div style={{ fontSize:13, color:"#94a3b8" }}>⏳ Membuka kamera...</div>
+          </div>
+        )}
+
+        {/* Error */}
+        {status === "error" && (
+          <div style={{ position:"absolute", inset:0, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:20 }}>
+            <div style={{ fontSize:32, marginBottom:8 }}>⚠️</div>
+            <div style={{ color:"#f87171", fontSize:12, textAlign:"center", lineHeight:1.5 }}>{errMsg}</div>
+          </div>
+        )}
+      </div>
+
+      {/* Tombol kamera */}
+      {status !== "active" ? (
+        <button onClick={startCamera} style={{
+          width:"100%", padding:"13px",
+          background:"linear-gradient(135deg,#22c55e,#16a34a)",
+          border:"none", borderRadius:10, color:"#fff",
+          fontSize:14, fontWeight:700, cursor:"pointer",
+          boxShadow:"0 4px 16px rgba(34,197,94,0.35)", marginBottom:8
+        }}>
+          {status === "loading" ? "⏳ Membuka kamera..." : "📷 Buka Kamera & Scan QR"}
+        </button>
+      ) : (
+        <button onClick={stopCamera} style={{
+          width:"100%", padding:"12px",
+          background:"rgba(239,68,68,0.15)", border:"1px solid rgba(239,68,68,0.3)",
+          borderRadius:10, color:"#f87171", fontSize:13, fontWeight:600,
+          cursor:"pointer", marginBottom:8
+        }}>
+          ⏸ Tutup Kamera
+        </button>
+      )}
+
+      {/* Info browser */}
+      {status === "idle" && (
+        <div style={{ fontSize:11, color:"#475569", textAlign:"center", marginBottom:4 }}>
+          💡 Pastikan buka di <strong style={{color:"#94a3b8"}}>Chrome / Safari</strong> dan izinkan akses kamera
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 export default function AbsensiPesantren() {
   const [screen, setScreen] = useState("home");
   const [kegiatan, setKegiatan] = useState("");
@@ -57,25 +233,21 @@ export default function AbsensiPesantren() {
   const [flash, setFlash] = useState(null);
   const [logs, setLogs] = useState([]);
   const [rekapTahunan, setRekapTahunan] = useState(loadRekap);
+  const [santriDB, setSantriDB] = useState([]);
+  const [dbStatus, setDbStatus] = useState("loading");
+  const [savedNotif, setSavedNotif] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [filterKamar, setFilterKamar] = useState("Semua");
   const [filterKegiatan, setFilterKegiatan] = useState("Semua");
   const [selectedSantri, setSelectedSantri] = useState(null);
   const [sortBy, setSortBy] = useState("nama");
-  const [savedNotif, setSavedNotif] = useState(false);
-  const [santriDB, setSantriDB] = useState([]);
-  const [kameraAktif, setKameraAktif] = useState(false);
-  const [kameraError, setKameraError] = useState(null);
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-  const scanLoopRef = useRef(null);
-  const streamRef = useRef(null);
-  const [dbStatus, setDbStatus] = useState("loading"); // loading | ok | error
   const inputRef = useRef(null);
   const intervalRef = useRef(null);
+  const lastDetected = useRef("");
+  const lastDetectedTime = useRef(0);
 
-  // Fetch data santri dari Google Sheets saat pertama load
-  useEffect(() => {
+  // Fetch Google Sheets
+  const fetchSantri = () => {
     setDbStatus("loading");
     fetch(SHEETS_CSV_URL)
       .then(r => r.text())
@@ -86,21 +258,14 @@ export default function AbsensiPesantren() {
         setDbStatus("ok");
       })
       .catch(() => setDbStatus("error"));
-  }, []);
+  };
 
-  useEffect(() => {
-    if (screen !== "sesi") return;
+  useEffect(() => { fetchSantri(); }, []);
+  useEffect(() => { if (screen !== "sesi") return;
     intervalRef.current = setInterval(() => {
-      setTimer(t => {
-        if (t <= 1) { clearInterval(intervalRef.current); endSesi(); return 0; }
-        return t - 1;
-      });
+      setTimer(t => { if (t <= 1) { clearInterval(intervalRef.current); setScreen("recap"); return 0; } return t - 1; });
     }, 1000);
     return () => clearInterval(intervalRef.current);
-  }, [screen]);
-
-  useEffect(() => {
-    if (screen === "sesi") setTimeout(() => inputRef.current?.focus(), 100);
   }, [screen]);
 
   useEffect(() => { saveRekap(rekapTahunan); }, [rekapTahunan]);
@@ -111,12 +276,51 @@ export default function AbsensiPesantren() {
     setScreen("sesi");
   };
 
-  const endSesi = useCallback(() => {
-    clearInterval(intervalRef.current);
-    setScreen("recap");
-  }, []);
+  // Proses kode QR dari kamera ATAU input manual
+  const prosesKode = useCallback((val) => {
+    // Anti-duplikat scan dalam 2 detik
+    const now = Date.now();
+    if (val === lastDetected.current && now - lastDetectedTime.current < 2000) return;
+    lastDetected.current = val;
+    lastDetectedTime.current = now;
 
-  const simpanKeRekap = (hadirData) => {
+    const santri = santriDB.find(s =>
+      s.qr.toUpperCase() === val || s.id.toUpperCase() === val
+    );
+    if (!santri) {
+      setFlash("err");
+      setLastScan({ nama: val, status: "Tidak Ditemukan ❌" });
+      setTimeout(() => setFlash(null), 1500); return;
+    }
+    if (hadir[santri.id]) {
+      setFlash("dup");
+      setLastScan({ nama: santri.nama, status: "Sudah Absen ⚠️" });
+      setTimeout(() => setFlash(null), 1500); return;
+    }
+    const waktu = nowTime();
+    setHadir(prev => ({ ...prev, [santri.id]: waktu }));
+    setLogs(prev => [{ ...santri, waktu }, ...prev]);
+    setFlash("ok");
+    setLastScan({ nama: santri.nama, status: `Hadir ✅ — ${waktu}` });
+    setTimeout(() => setFlash(null), 1500);
+  }, [santriDB, hadir]);
+
+  const handleManualInput = (e) => {
+    if (e.key !== "Enter") return;
+    const val = scanInput.trim().toUpperCase();
+    if (!val) return;
+    setScanInput("");
+    prosesKode(val);
+  };
+
+  const simulateScan = () => {
+    const belum = santriDB.filter(s => !hadir[s.id]);
+    if (!belum.length) return;
+    const pick = belum[Math.floor(Math.random() * belum.length)];
+    prosesKode(pick.qr || pick.id);
+  };
+
+  const simpanKeRekap = () => {
     const tahun = thisYear();
     const tanggal = new Date().toLocaleDateString("id-ID");
     setRekapTahunan(prev => {
@@ -124,10 +328,10 @@ export default function AbsensiPesantren() {
       santriDB.forEach(s => {
         if (!updated[s.id]) updated[s.id] = {};
         if (!updated[s.id][tahun]) updated[s.id][tahun] = {};
-        if (!updated[s.id][tahun][kegiatan]) updated[s.id][tahun][kegiatan] = { hadir: 0, alpha: 0, riwayat: [] };
-        const status = hadirData[s.id] ? "hadir" : "alpha";
+        if (!updated[s.id][tahun][kegiatan]) updated[s.id][tahun][kegiatan] = { hadir:0, alpha:0, riwayat:[] };
+        const status = hadir[s.id] ? "hadir" : "alpha";
         updated[s.id][tahun][kegiatan][status] += 1;
-        updated[s.id][tahun][kegiatan].riwayat.push({ tanggal, status, waktu: hadirData[s.id] || null });
+        updated[s.id][tahun][kegiatan].riwayat.push({ tanggal, status, waktu: hadir[s.id] || null });
       });
       return updated;
     });
@@ -135,407 +339,283 @@ export default function AbsensiPesantren() {
     setTimeout(() => setSavedNotif(false), 2500);
   };
 
-  // ── Kamera QR Scanner ──
-  const startKamera = async () => {
-    setKameraError(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play();
-      }
-      setKameraAktif(true);
-      scanLoopRef.current = setInterval(() => scanFrame(), 300);
-    } catch (err) {
-      setKameraError("Izin kamera ditolak atau kamera tidak tersedia. Gunakan input manual.");
-    }
-  };
-
-  const stopKamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => t.stop());
-      streamRef.current = null;
-    }
-    if (scanLoopRef.current) {
-      clearInterval(scanLoopRef.current);
-      scanLoopRef.current = null;
-    }
-    setKameraAktif(false);
-  };
-
-  const scanFrame = () => {
-    if (!videoRef.current || !canvasRef.current) return;
-    const video = videoRef.current;
-    if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
-    if (code && code.data) {
-      prosesKode(code.data.trim().toUpperCase());
-    }
-  };
-
-  const prosesKode = (val) => {
-    const santri = santriDB.find(s => s.qr === val || s.id === val);
-    if (!santri) {
-      setFlash("err");
-      setLastScan({ nama: val, status: "Tidak Ditemukan ❌" });
-      setTimeout(() => setFlash(null), 1200);
-      return;
-    }
-    if (hadir[santri.id]) {
-      setFlash("dup");
-      setLastScan({ nama: santri.nama, status: "Sudah Absen ⚠️" });
-      setTimeout(() => setFlash(null), 1200);
-      return;
-    }
-    const waktu = nowTime();
-    setHadir(prev => ({ ...prev, [santri.id]: waktu }));
-    setLogs(prev => [{ ...santri, waktu }, ...prev]);
-    setFlash("ok");
-    setLastScan({ nama: santri.nama, status: `Hadir ✅ — ${waktu}` });
-    setTimeout(() => setFlash(null), 1200);
-  };
-
-  // Stop kamera saat keluar dari sesi
-  useEffect(() => {
-    if (screen !== "sesi") stopKamera();
-  }, [screen]);
-
-  const handleScan = (e) => {
-    if (e.key !== "Enter") return;
-    const val = scanInput.trim().toUpperCase();
-    setScanInput("");
-    const santri = santriDB.find(s => s.qr === val || s.id === val);
-    if (!santri) {
-      setFlash("err"); setLastScan({ nama: val, status: "Tidak Ditemukan ❌" });
-      setTimeout(() => setFlash(null), 800); return;
-    }
-    if (hadir[santri.id]) {
-      setFlash("dup"); setLastScan({ nama: santri.nama, status: "Sudah Absen ⚠️" });
-      setTimeout(() => setFlash(null), 800); return;
-    }
-    const waktu = nowTime();
-    setHadir(prev => ({ ...prev, [santri.id]: waktu }));
-    setLogs(prev => [{ ...santri, waktu }, ...prev]);
-    setFlash("ok"); setLastScan({ nama: santri.nama, status: `Hadir ✅ — ${waktu}` });
-    setTimeout(() => setFlash(null), 800);
-  };
-
-  const simulateScan = () => {
-    const belum = santriDB.filter(s => !hadir[s.id]);
-    if (!belum.length) return;
-    const pick = belum[Math.floor(Math.random() * belum.length)];
-    const waktu = nowTime();
-    setHadir(prev => ({ ...prev, [pick.id]: waktu }));
-    setLogs(prev => [{ ...pick, waktu }, ...prev]);
-    setFlash("ok"); setLastScan({ nama: pick.nama, status: `Hadir ✅ — ${waktu}` });
-    setTimeout(() => setFlash(null), 800);
-  };
-
   const totalHadir = Object.keys(hadir).length;
   const totalSantri = santriDB.length;
-  const persen = Math.round((totalHadir / totalSantri) * 100);
-  const alpha = santriDB.filter(s => !hadir[s.id]);
+  const persen = totalSantri > 0 ? Math.round((totalHadir / totalSantri) * 100) : 0;
+  const alphaList = santriDB.filter(s => !hadir[s.id]);
   const timerPct = (timer / DURATION) * 100;
   const timerColor = timer > 300 ? "#4ade80" : timer > 120 ? "#facc15" : "#f87171";
 
   const generateWA = () => {
     const lines = [
       `🕌 *REKAP ABSENSI PESANTREN*`, `📅 ${todayStr()}`, `📌 Kegiatan: *${kegiatan}*`, ``,
-      `✅ Hadir      : ${totalHadir} santri`, `❌ Tidak Hadir: ${alpha.length} santri`,
+      `✅ Hadir      : ${totalHadir} santri`, `❌ Tidak Hadir: ${alphaList.length} santri`,
       `📊 Persentase : ${persen}%`, ``, `*Daftar Tidak Hadir:*`,
-      ...alpha.map(s => `• ${s.nama} (${s.kamar})`), ``,
+      ...alphaList.map(s=>`• ${s.nama} (${s.kamar})`), ``,
       `_Generated otomatis — Sistem Absensi Pesantren_`
     ].join("\n");
     window.open(`https://wa.me/?text=${encodeURIComponent(lines)}`, "_blank");
   };
 
   const downloadCSV = () => {
-    const rows = [["ID","Nama","Kamar","Status","Waktu Hadir","Kegiatan","Tanggal"]];
+    const rows = [["ID","Nama","Kamar","Status","Waktu","Kegiatan","Tanggal"]];
     santriDB.forEach(s => rows.push([s.id,s.nama,s.kamar,hadir[s.id]?"Hadir":"Alpha",hadir[s.id]||"-",kegiatan,new Date().toLocaleDateString("id-ID")]));
-    const blob = new Blob([rows.map(r=>r.join(",")).join("\n")], { type: "text/csv" });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-    a.download = `absensi-${kegiatan.replace(/ /g,"_")}-${Date.now()}.csv`; a.click();
+    const blob = new Blob([rows.map(r=>r.join(",")).join("\n")],{type:"text/csv"});
+    const a = document.createElement("a"); a.href=URL.createObjectURL(blob);
+    a.download=`absensi-${kegiatan.replace(/ /g,"_")}-${Date.now()}.csv`; a.click();
   };
 
-  const getStatSantri = (santriId, tahun = thisYear(), kgFilter = "Semua") => {
-    const data = rekapTahunan[santriId]?.[tahun] || {};
-    let totalH = 0, totalA = 0; const perKegiatan = {};
-    Object.entries(data).forEach(([kg, val]) => {
+  const getStatSantri = (id, tahun=thisYear(), kgFilter="Semua") => {
+    const data = rekapTahunan[id]?.[tahun] || {};
+    let tH=0, tA=0; const perKg={};
+    Object.entries(data).forEach(([kg,val]) => {
       if (kgFilter !== "Semua" && kg !== kgFilter) return;
-      totalH += val.hadir; totalA += val.alpha;
-      perKegiatan[kg] = { hadir: val.hadir, alpha: val.alpha, riwayat: val.riwayat };
+      tH += val.hadir; tA += val.alpha;
+      perKg[kg] = val;
     });
-    const total = totalH + totalA;
-    return { totalH, totalA, total, persen: total > 0 ? Math.round((totalH / total) * 100) : 0, perKegiatan };
+    const tot = tH+tA;
+    return { totalH:tH, totalA:tA, total:tot, persen:tot>0?Math.round(tH/tot*100):0, perKg };
   };
 
   const downloadCSVTahunan = () => {
     const tahun = thisYear();
-    const rows = [["ID","Nama","Kamar","Kegiatan","Total Sesi","Hadir","Alpha","Persentase"]];
+    const rows=[["ID","Nama","Kamar","Kegiatan","Total Sesi","Hadir","Alpha","Persentase"]];
     santriDB.forEach(s => {
-      const data = rekapTahunan[s.id]?.[tahun] || {};
-      Object.entries(data).forEach(([kg, val]) => {
-        const tot = val.hadir + val.alpha;
+      const data = rekapTahunan[s.id]?.[tahun]||{};
+      if (Object.keys(data).length === 0) { rows.push([s.id,s.nama,s.kamar,"-",0,0,0,"0%"]); return; }
+      Object.entries(data).forEach(([kg,val]) => {
+        const tot=val.hadir+val.alpha;
         rows.push([s.id,s.nama,s.kamar,kg,tot,val.hadir,val.alpha,`${tot>0?Math.round(val.hadir/tot*100):0}%`]);
       });
-      if (!Object.keys(data).length) rows.push([s.id,s.nama,s.kamar,"-",0,0,0,"0%"]);
     });
-    const blob = new Blob([rows.map(r=>r.join(",")).join("\n")], { type: "text/csv" });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-    a.download = `rekap-tahunan-${tahun}.csv`; a.click();
+    const blob=new Blob([rows.map(r=>r.join(",")).join("\n")],{type:"text/csv"});
+    const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+    a.download=`rekap-tahunan-${tahun}.csv`; a.click();
   };
 
-  const kamarList = ["Semua", ...new Set(santriDB.map(s => s.kamar))];
-  const kegiatanList = ["Semua", ...KEGIATAN];
+  const kamarList = ["Semua",...new Set(santriDB.map(s=>s.kamar))];
+  const kegiatanList = ["Semua",...KEGIATAN];
   const santriFiltered = santriDB
-    .filter(s => filterKamar === "Semua" || s.kamar === filterKamar)
-    .filter(s => searchQuery === "" || s.nama.toLowerCase().includes(searchQuery.toLowerCase()) || s.id.toLowerCase().includes(searchQuery.toLowerCase()))
-    .map(s => ({ ...s, stat: getStatSantri(s.id, thisYear(), filterKegiatan) }))
-    .sort((a, b) => {
-      if (sortBy === "hadir") return b.stat.totalH - a.stat.totalH;
-      if (sortBy === "alpha") return b.stat.totalA - a.stat.totalA;
-      if (sortBy === "persen") return b.stat.persen - a.stat.persen;
+    .filter(s => filterKamar==="Semua" || s.kamar===filterKamar)
+    .filter(s => searchQuery==="" || s.nama.toLowerCase().includes(searchQuery.toLowerCase()) || s.id.toLowerCase().includes(searchQuery.toLowerCase()))
+    .map(s => ({...s, stat:getStatSantri(s.id,thisYear(),filterKegiatan)}))
+    .sort((a,b) => {
+      if (sortBy==="hadir") return b.stat.totalH-a.stat.totalH;
+      if (sortBy==="alpha") return b.stat.totalA-a.stat.totalA;
+      if (sortBy==="persen") return b.stat.persen-a.stat.persen;
       return a.nama.localeCompare(b.nama);
     });
 
-  const S = { minHeight:"100vh", background:"linear-gradient(135deg,#0f172a 0%,#1e293b 50%,#0f2027 100%)", fontFamily:"'Segoe UI',system-ui,sans-serif", color:"#e2e8f0" };
   const card = { background:"rgba(255,255,255,0.04)", border:"1px solid rgba(255,255,255,0.08)", borderRadius:12 };
 
   return (
-    <div style={S}>
+    <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#0f172a 0%,#1e293b 50%,#0f2027 100%)", fontFamily:"'Segoe UI',system-ui,sans-serif", color:"#e2e8f0" }}>
+
+      {/* Notifikasi simpan */}
       {savedNotif && (
-        <div style={{ position:"fixed", top:70, left:"50%", transform:"translateX(-50%)", zIndex:300,
-          background:"linear-gradient(135deg,#22c55e,#16a34a)", color:"#fff", padding:"10px 24px",
-          borderRadius:30, fontSize:13, fontWeight:700, boxShadow:"0 4px 20px rgba(34,197,94,0.4)" }}>
-          ✅ Berhasil disimpan ke Rekap Tahunan!
+        <div style={{ position:"fixed",top:70,left:"50%",transform:"translateX(-50%)",zIndex:999,
+          background:"linear-gradient(135deg,#22c55e,#16a34a)",color:"#fff",padding:"10px 24px",
+          borderRadius:30,fontSize:13,fontWeight:700,boxShadow:"0 4px 20px rgba(34,197,94,0.4)",whiteSpace:"nowrap" }}>
+          ✅ Tersimpan ke Rekap Tahunan!
         </div>
       )}
 
-      <header style={{ background:"rgba(255,255,255,0.03)", borderBottom:"1px solid rgba(255,255,255,0.08)",
-        padding:"13px 18px", display:"flex", alignItems:"center", gap:10,
-        position:"sticky", top:0, zIndex:100, backdropFilter:"blur(12px)" }}>
-        <div style={{ fontSize:24 }}>🕌</div>
-        <div style={{ flex:1 }}>
-          <div style={{ fontWeight:700, fontSize:14, color:"#f8fafc" }}>Sistem Absensi Pesantren</div>
-          <div style={{ fontSize:10, color:"#64748b" }}>{todayStr()}</div>
+      {/* Flash scan */}
+      {flash && (
+        <div style={{ position:"fixed",inset:0,zIndex:200,pointerEvents:"none",
+          background:flash==="ok"?"rgba(34,197,94,0.18)":flash==="dup"?"rgba(250,204,21,0.18)":"rgba(248,113,113,0.18)",
+          transition:"background 0.2s" }}/>
+      )}
+
+      {/* Header */}
+      <header style={{ background:"rgba(255,255,255,0.03)",borderBottom:"1px solid rgba(255,255,255,0.08)",
+        padding:"13px 18px",display:"flex",alignItems:"center",gap:10,
+        position:"sticky",top:0,zIndex:100,backdropFilter:"blur(12px)" }}>
+        <div style={{fontSize:24}}>🕌</div>
+        <div style={{flex:1}}>
+          <div style={{fontWeight:700,fontSize:14,color:"#f8fafc"}}>Sistem Absensi Pesantren</div>
+          <div style={{fontSize:10,color:"#64748b"}}>{todayStr()}</div>
         </div>
         {screen !== "home" && (
-          <button onClick={() => { setScreen("home"); setSelectedSantri(null); }} style={{
-            background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.1)",
-            borderRadius:8, color:"#94a3b8", padding:"5px 11px", cursor:"pointer", fontSize:11 }}>← Beranda</button>
+          <button onClick={()=>{setScreen("home");setSelectedSantri(null);clearInterval(intervalRef.current);}} style={{
+            background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",
+            borderRadius:8,color:"#94a3b8",padding:"5px 11px",cursor:"pointer",fontSize:11}}>← Beranda</button>
         )}
       </header>
 
-      <div style={{ maxWidth:680, margin:"0 auto", padding:"18px 13px" }}>
+      <div style={{maxWidth:680,margin:"0 auto",padding:"18px 13px"}}>
 
-        {/* HOME */}
-        {screen === "home" && (
+        {/* ══ HOME ══ */}
+        {screen==="home" && (
           <div>
-            <div style={{ textAlign:"center", marginBottom:28, paddingTop:14 }}>
-              <div style={{ fontSize:52, marginBottom:8 }}>📋</div>
-              <h1 style={{ fontSize:22, fontWeight:800, color:"#f8fafc", margin:"0 0 5px" }}>Absensi Digital Pesantren</h1>
-              <p style={{ color:"#64748b", fontSize:12, margin:0 }}>Sistem absensi QR Code — cepat, akurat, otomatis</p>
+            <div style={{textAlign:"center",marginBottom:24,paddingTop:10}}>
+              <div style={{fontSize:52,marginBottom:8}}>📋</div>
+              <h1 style={{fontSize:22,fontWeight:800,color:"#f8fafc",margin:"0 0 5px"}}>Absensi Digital Pesantren</h1>
+              <p style={{color:"#64748b",fontSize:12,margin:0}}>Sistem absensi QR Code — cepat, akurat, otomatis</p>
             </div>
 
-            {/* Status koneksi Google Sheets */}
-            {dbStatus === "loading" && (
-              <div style={{ padding:"10px 14px", background:"rgba(250,204,21,0.08)", border:"1px solid rgba(250,204,21,0.2)", borderRadius:10, marginBottom:14, fontSize:12, color:"#fde68a", textAlign:"center" }}>
+            {/* Status Sheets */}
+            {dbStatus==="loading" && (
+              <div style={{padding:"10px 14px",background:"rgba(250,204,21,0.08)",border:"1px solid rgba(250,204,21,0.2)",borderRadius:10,marginBottom:12,fontSize:12,color:"#fde68a",textAlign:"center"}}>
                 ⏳ Memuat data santri dari Google Sheets...
               </div>
             )}
-            {dbStatus === "error" && (
-              <div style={{ padding:"10px 14px", background:"rgba(239,68,68,0.08)", border:"1px solid rgba(239,68,68,0.2)", borderRadius:10, marginBottom:14, fontSize:12, color:"#fca5a5" }}>
-                ⚠️ <strong>Gagal memuat data santri.</strong> Pastikan Google Sheets sudah dipublish dan koneksi internet aktif. <button onClick={()=>{setDbStatus("loading");fetch(SHEETS_CSV_URL).then(r=>r.text()).then(t=>{const p=parseCSV(t);if(p.length){setSantriDB(p);setDbStatus("ok");}else setDbStatus("error");}).catch(()=>setDbStatus("error"));}} style={{marginLeft:8,padding:"2px 10px",borderRadius:6,background:"rgba(239,68,68,0.2)",border:"1px solid rgba(239,68,68,0.3)",color:"#fca5a5",cursor:"pointer",fontSize:11}}>Coba Lagi</button>
+            {dbStatus==="error" && (
+              <div style={{padding:"10px 14px",background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:10,marginBottom:12,fontSize:12,color:"#fca5a5",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span>⚠️ Gagal memuat data santri dari Sheets.</span>
+                <button onClick={fetchSantri} style={{padding:"4px 12px",borderRadius:6,background:"rgba(239,68,68,0.2)",border:"1px solid rgba(239,68,68,0.3)",color:"#fca5a5",cursor:"pointer",fontSize:11}}>Coba Lagi</button>
               </div>
             )}
-            {dbStatus === "ok" && (
-              <div style={{ padding:"8px 14px", background:"rgba(34,197,94,0.08)", border:"1px solid rgba(34,197,94,0.15)", borderRadius:10, marginBottom:14, fontSize:12, color:"#86efac", textAlign:"center" }}>
-                ✅ Database terhubung — <strong>{santriDB.length} santri</strong> berhasil dimuat dari Google Sheets
+            {dbStatus==="ok" && (
+              <div style={{padding:"9px 14px",background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.15)",borderRadius:10,marginBottom:12,fontSize:12,color:"#86efac",textAlign:"center"}}>
+                ✅ <strong>{santriDB.length} santri</strong> berhasil dimuat dari Google Sheets
               </div>
             )}
 
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:9, marginBottom:22 }}>
-              {[{icon:"👥",label:"Total Santri",val:dbStatus==="ok"?`${santriDB.length}`:"..."},{icon:"⚡",label:"Durasi Sesi",val:"15 Menit"},{icon:"📤",label:"Rekap",val:"WA + Sheets"}].map((s,i)=>(
-                <div key={i} style={{...card, padding:"14px 8px", textAlign:"center"}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:9,marginBottom:20}}>
+              {[
+                {icon:"👥",label:"Total Santri",val:dbStatus==="ok"?`${santriDB.length}`:"..."},
+                {icon:"⚡",label:"Durasi Sesi",val:"15 Menit"},
+                {icon:"📤",label:"Rekap",val:"WA + Sheets"}
+              ].map((s,i)=>(
+                <div key={i} style={{...card,padding:"14px 8px",textAlign:"center"}}>
                   <div style={{fontSize:20,marginBottom:3}}>{s.icon}</div>
                   <div style={{fontSize:16,fontWeight:700,color:"#f8fafc"}}>{s.val}</div>
                   <div style={{fontSize:10,color:"#64748b"}}>{s.label}</div>
                 </div>
               ))}
             </div>
-            <button onClick={() => setScreen("setup")} style={{
-              width:"100%", padding:"15px", background:"linear-gradient(135deg,#22c55e,#16a34a)",
-              border:"none", borderRadius:12, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer",
-              boxShadow:"0 6px 20px rgba(34,197,94,0.3)", marginBottom:10 }}>
+
+            <button onClick={()=>setScreen("setup")} disabled={dbStatus!=="ok"} style={{
+              width:"100%",padding:"15px",background:dbStatus==="ok"?"linear-gradient(135deg,#22c55e,#16a34a)":"rgba(255,255,255,0.05)",
+              border:"none",borderRadius:12,color:dbStatus==="ok"?"#fff":"#475569",
+              fontSize:15,fontWeight:700,cursor:dbStatus==="ok"?"pointer":"not-allowed",
+              boxShadow:dbStatus==="ok"?"0 6px 20px rgba(34,197,94,0.3)":"none",marginBottom:10}}>
               🚀 Mulai Sesi Absensi
             </button>
-            <button onClick={() => setScreen("tahunan")} style={{
-              width:"100%", padding:"15px", background:"linear-gradient(135deg,#6366f1,#4f46e5)",
-              border:"none", borderRadius:12, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer",
-              boxShadow:"0 6px 20px rgba(99,102,241,0.3)", marginBottom:14 }}>
+
+            <button onClick={()=>setScreen("tahunan")} style={{
+              width:"100%",padding:"15px",background:"linear-gradient(135deg,#6366f1,#4f46e5)",
+              border:"none",borderRadius:12,color:"#fff",fontSize:15,fontWeight:700,cursor:"pointer",
+              boxShadow:"0 6px 20px rgba(99,102,241,0.3)",marginBottom:14}}>
               📊 Rekap Tahunan Per Santri
             </button>
-            <div style={{ padding:12, background:"rgba(59,130,246,0.08)", border:"1px solid rgba(59,130,246,0.2)", borderRadius:10 }}>
-              <div style={{fontSize:12,color:"#93c5fd"}}>💡 <strong>Rekap Tahunan</strong> — lihat total hadir & alpha setiap santri per kegiatan selama setahun penuh.</div>
+
+            <div style={{padding:12,background:"rgba(59,130,246,0.08)",border:"1px solid rgba(59,130,246,0.2)",borderRadius:10}}>
+              <div style={{fontSize:12,color:"#93c5fd"}}>
+                💡 <strong>Cara pakai:</strong> Pilih kegiatan → Buka kamera → Arahkan ke kartu QR santri → Rekap otomatis setelah 15 menit
+              </div>
             </div>
           </div>
         )}
 
-        {/* SETUP */}
-        {screen === "setup" && (
+        {/* ══ SETUP ══ */}
+        {screen==="setup" && (
           <div>
-            <h2 style={{fontSize:18,fontWeight:700,marginBottom:18,color:"#f8fafc"}}>⚙️ Buka Sesi Absensi</h2>
-            <label style={{display:"block",marginBottom:7,color:"#94a3b8",fontSize:12}}>Pilih Kegiatan</label>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:18}}>
-              {KEGIATAN.map(k => (
-                <button key={k} onClick={() => setKegiatan(k)} style={{
-                  padding:"10px 12px", borderRadius:9, cursor:"pointer", fontSize:12,
+            <h2 style={{fontSize:18,fontWeight:700,marginBottom:18,color:"#f8fafc"}}>⚙️ Pilih Kegiatan</h2>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:18}}>
+              {KEGIATAN.map(k=>(
+                <button key={k} onClick={()=>setKegiatan(k)} style={{
+                  padding:"11px 12px",borderRadius:9,cursor:"pointer",fontSize:12,
                   background:kegiatan===k?"linear-gradient(135deg,#22c55e,#16a34a)":"rgba(255,255,255,0.04)",
                   border:kegiatan===k?"2px solid #22c55e":"1px solid rgba(255,255,255,0.08)",
-                  color:kegiatan===k?"#fff":"#cbd5e1", fontWeight:kegiatan===k?700:400 }}>{k}</button>
+                  color:kegiatan===k?"#fff":"#cbd5e1",fontWeight:kegiatan===k?700:400}}>
+                  {k}
+                </button>
               ))}
             </div>
             <input type="text" placeholder="Atau ketik kegiatan lain..."
               value={KEGIATAN.includes(kegiatan)?"":kegiatan} onChange={e=>setKegiatan(e.target.value)}
-              style={{width:"100%",padding:"10px 12px",borderRadius:9,marginBottom:18,background:"rgba(255,255,255,0.05)",
-                border:"1px solid rgba(255,255,255,0.1)",color:"#f8fafc",fontSize:12,boxSizing:"border-box"}}/>
+              style={{width:"100%",padding:"11px 13px",borderRadius:9,marginBottom:18,
+                background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",
+                color:"#f8fafc",fontSize:12,boxSizing:"border-box"}}/>
             <button onClick={startSesi} disabled={!kegiatan} style={{
-              width:"100%", padding:"14px", border:"none", borderRadius:11,
+              width:"100%",padding:"14px",border:"none",borderRadius:11,
               background:kegiatan?"linear-gradient(135deg,#22c55e,#16a34a)":"rgba(255,255,255,0.05)",
-              color:kegiatan?"#fff":"#475569", fontSize:14, fontWeight:700, cursor:kegiatan?"pointer":"not-allowed"}}>
+              color:kegiatan?"#fff":"#475569",fontSize:14,fontWeight:700,cursor:kegiatan?"pointer":"not-allowed"}}>
               ▶ Mulai — {kegiatan||"Pilih kegiatan dulu"}
             </button>
           </div>
         )}
 
-        {/* SESI */}
-        {screen === "sesi" && (
+        {/* ══ SESI ══ */}
+        {screen==="sesi" && (
           <div>
-            {flash && <div style={{position:"fixed",inset:0,zIndex:200,pointerEvents:"none",
-              background:flash==="ok"?"rgba(34,197,94,0.15)":flash==="dup"?"rgba(250,204,21,0.15)":"rgba(248,113,113,0.15)"}}/>}
-            <div style={{textAlign:"center",marginBottom:18}}>
+            {/* Timer */}
+            <div style={{textAlign:"center",marginBottom:16}}>
               <div style={{fontSize:10,color:"#64748b",marginBottom:3,letterSpacing:2,textTransform:"uppercase"}}>{kegiatan}</div>
-              <div style={{position:"relative",display:"inline-block",marginBottom:5}}>
-                <svg width="125" height="125" style={{transform:"rotate(-90deg)"}}>
-                  <circle cx="62" cy="62" r="54" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="7"/>
-                  <circle cx="62" cy="62" r="54" fill="none" stroke={timerColor} strokeWidth="7"
-                    strokeDasharray={`${2*Math.PI*54}`} strokeDashoffset={`${2*Math.PI*54*(1-timerPct/100)}`}
+              <div style={{position:"relative",display:"inline-block"}}>
+                <svg width="120" height="120" style={{transform:"rotate(-90deg)"}}>
+                  <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="7"/>
+                  <circle cx="60" cy="60" r="52" fill="none" stroke={timerColor} strokeWidth="7"
+                    strokeDasharray={`${2*Math.PI*52}`}
+                    strokeDashoffset={`${2*Math.PI*52*(1-timerPct/100)}`}
                     strokeLinecap="round" style={{transition:"stroke-dashoffset 1s linear,stroke 0.5s"}}/>
                 </svg>
                 <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
-                  <div style={{fontSize:26,fontWeight:800,color:timerColor,fontVariantNumeric:"tabular-nums"}}>{fmt(timer)}</div>
-                  <div style={{fontSize:10,color:"#64748b"}}>tersisa</div>
+                  <div style={{fontSize:24,fontWeight:800,color:timerColor,fontVariantNumeric:"tabular-nums"}}>{fmt(timer)}</div>
+                  <div style={{fontSize:9,color:"#64748b"}}>tersisa</div>
                 </div>
               </div>
             </div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:7,marginBottom:13}}>
-              {[{val:totalHadir,label:"Hadir",color:"#4ade80"},{val:alpha.length,label:"Belum",color:"#f87171"},{val:`${persen}%`,label:"Kehadiran",color:"#60a5fa"}].map((s,i)=>(
+
+            {/* Counter */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:7,marginBottom:14}}>
+              {[{val:totalHadir,label:"Hadir",color:"#4ade80"},{val:alphaList.length,label:"Belum",color:"#f87171"},{val:`${persen}%`,label:"Kehadiran",color:"#60a5fa"}].map((s,i)=>(
                 <div key={i} style={{...card,padding:"9px 5px",textAlign:"center"}}>
                   <div style={{fontSize:18,fontWeight:800,color:s.color}}>{s.val}</div>
                   <div style={{fontSize:10,color:"#64748b"}}>{s.label}</div>
                 </div>
               ))}
             </div>
-            {/* AREA KAMERA */}
-            <div style={{...card,padding:13,marginBottom:10}}>
-              <div style={{fontSize:11,color:"#94a3b8",marginBottom:8,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                <span>📷 Scan QR Santri</span>
-                {kameraAktif && <span style={{fontSize:10,color:"#4ade80",fontWeight:600}}>● KAMERA AKTIF</span>}
-              </div>
 
-              {/* Viewfinder kamera */}
-              <div style={{position:"relative",borderRadius:10,overflow:"hidden",background:"#000",
-                marginBottom:10,aspectRatio:"4/3",display:"flex",alignItems:"center",justifyContent:"center"}}>
-                <video ref={videoRef} playsInline muted
-                  style={{width:"100%",height:"100%",objectFit:"cover",display:kameraAktif?"block":"none"}}/>
-                <canvas ref={canvasRef} style={{display:"none"}}/>
+            {/* KAMERA QR SCANNER */}
+            <div style={{...card,padding:13,marginBottom:12}}>
+              <div style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:600}}>📷 Kamera QR Scanner</div>
+              <QRScanner onDetected={prosesKode}/>
 
-                {/* Overlay garis pemandu QR */}
-                {kameraAktif && (
-                  <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-                    <div style={{width:180,height:180,position:"relative"}}>
-                      {[{top:0,left:0},{top:0,right:0},{bottom:0,left:0},{bottom:0,right:0}].map((pos,i)=>(
-                        <div key={i} style={{position:"absolute",width:30,height:30,...pos,
-                          borderTop:pos.top===0?"3px solid #4ade80":"none",
-                          borderBottom:pos.bottom===0?"3px solid #4ade80":"none",
-                          borderLeft:pos.left===0?"3px solid #4ade80":"none",
-                          borderRight:pos.right===0?"3px solid #4ade80":"none"}}/>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Placeholder saat kamera belum aktif */}
-                {!kameraAktif && (
-                  <div style={{textAlign:"center",padding:20}}>
-                    <div style={{fontSize:40,marginBottom:8}}>📷</div>
-                    <div style={{color:"#475569",fontSize:12}}>Kamera belum aktif</div>
-                    {kameraError && <div style={{color:"#f87171",fontSize:11,marginTop:6}}>{kameraError}</div>}
-                  </div>
-                )}
-              </div>
-
-              {/* Tombol kamera */}
-              {!kameraAktif ? (
-                <button onClick={startKamera} style={{width:"100%",padding:"11px",
-                  background:"linear-gradient(135deg,#22c55e,#16a34a)",border:"none",
-                  borderRadius:9,color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer",
-                  boxShadow:"0 4px 14px rgba(34,197,94,0.3)",marginBottom:8}}>
-                  📷 Buka Kamera & Mulai Scan
-                </button>
-              ) : (
-                <button onClick={stopKamera} style={{width:"100%",padding:"11px",
-                  background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.3)",
-                  borderRadius:9,color:"#f87171",fontSize:13,fontWeight:600,cursor:"pointer",marginBottom:8}}>
-                  ⏸ Tutup Kamera
-                </button>
-              )}
-
-              {/* Feedback scan terakhir */}
+              {/* Feedback */}
               {lastScan && (
-                <div style={{padding:"9px 12px",borderRadius:8,fontSize:13,marginBottom:8,
+                <div style={{marginTop:8,padding:"9px 12px",borderRadius:9,fontSize:13,
                   background:flash==="ok"?"rgba(34,197,94,0.12)":flash==="dup"?"rgba(250,204,21,0.12)":"rgba(248,113,113,0.12)",
                   border:`1px solid ${flash==="ok"?"rgba(34,197,94,0.35)":flash==="dup"?"rgba(250,204,21,0.35)":"rgba(248,113,113,0.35)"}`}}>
                   <strong>{lastScan.nama}</strong> — {lastScan.status}
                 </div>
               )}
 
-              {/* Input manual sebagai backup */}
-              <details style={{marginTop:4}}>
-                <summary style={{fontSize:11,color:"#64748b",cursor:"pointer",userSelect:"none"}}>
-                  ✏️ Input kode manual (jika kamera tidak bisa)
+              {/* Input manual (backup) */}
+              <details style={{marginTop:10}}>
+                <summary style={{fontSize:11,color:"#64748b",cursor:"pointer",userSelect:"none",listStyle:"none"}}>
+                  ✏️ Input kode manual (backup jika kamera bermasalah)
                 </summary>
                 <div style={{marginTop:8,display:"flex",gap:7}}>
                   <input ref={inputRef} type="text" value={scanInput}
-                    onChange={e=>setScanInput(e.target.value)} onKeyDown={handleScan}
-                    placeholder="QR-0001 lalu Enter..."
+                    onChange={e=>setScanInput(e.target.value)} onKeyDown={handleManualInput}
+                    placeholder="Ketik QR-0001 lalu tekan Enter..."
                     style={{flex:1,padding:"9px 11px",borderRadius:8,background:"rgba(255,255,255,0.06)",
-                      border:"1px solid rgba(255,255,255,0.12)",color:"#f8fafc",fontSize:12}}/>
+                      border:"1px solid rgba(255,255,255,0.12)",color:"#f8fafc",fontSize:12,boxSizing:"border-box"}}/>
                   <button onClick={()=>{if(scanInput.trim()){prosesKode(scanInput.trim().toUpperCase());setScanInput("");}}}
                     style={{padding:"9px 14px",borderRadius:8,background:"rgba(99,102,241,0.2)",
-                      border:"1px solid rgba(99,102,241,0.3)",color:"#a5b4fc",fontSize:12,cursor:"pointer"}}>OK</button>
+                      border:"1px solid rgba(99,102,241,0.3)",color:"#a5b4fc",fontSize:12,cursor:"pointer",whiteSpace:"nowrap"}}>
+                    OK
+                  </button>
                 </div>
-                <button onClick={simulateScan} style={{marginTop:6,width:"100%",padding:"7px",background:"rgba(99,102,241,0.1)",
+                <button onClick={simulateScan} style={{marginTop:6,width:"100%",padding:"8px",background:"rgba(99,102,241,0.08)",
                   border:"1px solid rgba(99,102,241,0.2)",borderRadius:7,color:"#818cf8",fontSize:11,cursor:"pointer"}}>
-                  🎲 Simulasi Scan (Demo)
+                  🎲 Simulasi Scan Acak (Demo)
                 </button>
               </details>
             </div>
+
+            {/* Log terbaru */}
             {logs.length > 0 && (
-              <div style={{...card,overflow:"hidden",marginBottom:10}}>
-                <div style={{padding:"7px 11px",borderBottom:"1px solid rgba(255,255,255,0.06)",fontSize:10,color:"#64748b",textTransform:"uppercase",letterSpacing:1}}>Log Terbaru</div>
-                <div style={{maxHeight:140,overflowY:"auto"}}>
-                  {logs.slice(0,7).map((l,i)=>(
-                    <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"6px 11px",borderBottom:"1px solid rgba(255,255,255,0.03)",fontSize:11}}>
+              <div style={{...card,overflow:"hidden",marginBottom:12}}>
+                <div style={{padding:"7px 12px",borderBottom:"1px solid rgba(255,255,255,0.06)",fontSize:10,color:"#64748b",textTransform:"uppercase",letterSpacing:1}}>
+                  Log Absensi ({logs.length} santri)
+                </div>
+                <div style={{maxHeight:150,overflowY:"auto"}}>
+                  {logs.slice(0,10).map((l,i)=>(
+                    <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"7px 12px",borderBottom:"1px solid rgba(255,255,255,0.03)",fontSize:12}}>
                       <span><strong style={{color:"#f8fafc"}}>{l.nama}</strong> <span style={{color:"#64748b"}}>{l.kamar}</span></span>
                       <span style={{color:"#4ade80"}}>✅ {l.waktu}</span>
                     </div>
@@ -543,26 +623,29 @@ export default function AbsensiPesantren() {
                 </div>
               </div>
             )}
-            <button onClick={endSesi} style={{width:"100%",padding:"12px",background:"rgba(239,68,68,0.15)",
-              border:"1px solid rgba(239,68,68,0.3)",borderRadius:10,color:"#f87171",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+
+            <button onClick={()=>{clearInterval(intervalRef.current);setScreen("recap");}} style={{
+              width:"100%",padding:"12px",background:"rgba(239,68,68,0.15)",
+              border:"1px solid rgba(239,68,68,0.3)",borderRadius:10,
+              color:"#f87171",fontSize:13,fontWeight:700,cursor:"pointer"}}>
               ⏹ Tutup Sesi & Lihat Rekap
             </button>
           </div>
         )}
 
-        {/* RECAP SESI */}
-        {screen === "recap" && (
+        {/* ══ RECAP SESI ══ */}
+        {screen==="recap" && (
           <div>
             <div style={{textAlign:"center",marginBottom:20}}>
               <div style={{fontSize:40,marginBottom:5}}>📊</div>
               <h2 style={{fontSize:19,fontWeight:800,color:"#f8fafc",margin:"0 0 3px"}}>Rekap Sesi</h2>
               <div style={{color:"#64748b",fontSize:11}}>{kegiatan} — {todayStr()}</div>
             </div>
-            <div style={{background:"linear-gradient(135deg,rgba(34,197,94,0.1),rgba(16,185,129,0.05))",
-              border:"1px solid rgba(34,197,94,0.2)",borderRadius:12,padding:16,marginBottom:13}}>
+
+            <div style={{background:"linear-gradient(135deg,rgba(34,197,94,0.1),rgba(16,185,129,0.05))",border:"1px solid rgba(34,197,94,0.2)",borderRadius:12,padding:16,marginBottom:12}}>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:12}}>
                 {[{label:"Total",val:totalSantri,color:"#f8fafc"},{label:"Hadir",val:totalHadir,color:"#4ade80"},
-                  {label:"Alpha",val:alpha.length,color:"#f87171"},{label:"Persen",val:`${persen}%`,color:"#60a5fa"}].map((s,i)=>(
+                  {label:"Alpha",val:alphaList.length,color:"#f87171"},{label:"Persen",val:`${persen}%`,color:"#60a5fa"}].map((s,i)=>(
                   <div key={i} style={{textAlign:"center"}}>
                     <div style={{fontSize:20,fontWeight:800,color:s.color}}>{s.val}</div>
                     <div style={{fontSize:10,color:"#64748b"}}>{s.label}</div>
@@ -574,40 +657,42 @@ export default function AbsensiPesantren() {
               </div>
             </div>
 
-            {/* SIMPAN KE REKAP TAHUNAN */}
-            <button onClick={() => simpanKeRekap(hadir)} style={{
-              width:"100%", padding:"14px", marginBottom:10,
+            <button onClick={simpanKeRekap} style={{
+              width:"100%",padding:"14px",marginBottom:6,
               background:"linear-gradient(135deg,#6366f1,#4f46e5)",
-              border:"none", borderRadius:11, color:"#fff",
-              fontSize:14, fontWeight:700, cursor:"pointer",
-              boxShadow:"0 4px 16px rgba(99,102,241,0.35)" }}>
+              border:"none",borderRadius:11,color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer",
+              boxShadow:"0 4px 16px rgba(99,102,241,0.35)"}}>
               💾 Simpan ke Rekap Tahunan
             </button>
             <div style={{fontSize:11,color:"#64748b",textAlign:"center",marginBottom:12}}>
-              ↑ Klik tombol ini agar data sesi ini tersimpan ke rekap tahunan per santri
+              ↑ Klik ini agar data tersimpan permanen ke rekap tahunan
             </div>
 
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9,marginBottom:9}}>
-              <button onClick={generateWA} style={{padding:"12px",borderRadius:10,cursor:"pointer",background:"linear-gradient(135deg,#25D366,#128C7E)",border:"none",color:"#fff",fontSize:12,fontWeight:700}}>📲 WhatsApp</button>
+              <button onClick={generateWA} style={{padding:"12px",borderRadius:10,cursor:"pointer",background:"linear-gradient(135deg,#25D366,#128C7E)",border:"none",color:"#fff",fontSize:12,fontWeight:700}}>📲 Kirim WhatsApp</button>
               <button onClick={downloadCSV} style={{padding:"12px",borderRadius:10,cursor:"pointer",background:"linear-gradient(135deg,#34a853,#0f9d58)",border:"none",color:"#fff",fontSize:12,fontWeight:700}}>📊 Export Sheets</button>
             </div>
-            <button onClick={() => setScreen("tahunan")} style={{width:"100%",padding:"11px",marginBottom:7,
+
+            <button onClick={()=>setScreen("tahunan")} style={{width:"100%",padding:"11px",marginBottom:7,
               background:"rgba(99,102,241,0.1)",border:"1px solid rgba(99,102,241,0.3)",
               borderRadius:10,color:"#a5b4fc",fontSize:12,fontWeight:600,cursor:"pointer"}}>
               📊 Lihat Rekap Tahunan Per Santri →
             </button>
-            <button onClick={() => { setScreen("home"); setKegiatan(""); }} style={{width:"100%",padding:"10px",
+
+            <button onClick={()=>{setScreen("home");setKegiatan("");}} style={{width:"100%",padding:"10px",
               background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",
-              borderRadius:10,color:"#94a3b8",fontSize:12,cursor:"pointer"}}>🔄 Sesi Baru</button>
+              borderRadius:10,color:"#94a3b8",fontSize:12,cursor:"pointer"}}>
+              🔄 Mulai Sesi Baru
+            </button>
           </div>
         )}
 
-        {/* REKAP TAHUNAN — LIST */}
-        {screen === "tahunan" && !selectedSantri && (
+        {/* ══ REKAP TAHUNAN — LIST ══ */}
+        {screen==="tahunan" && !selectedSantri && (
           <div>
-            <div style={{marginBottom:18}}>
+            <div style={{marginBottom:16}}>
               <h2 style={{fontSize:18,fontWeight:800,color:"#f8fafc",margin:"0 0 3px"}}>📊 Rekap Tahunan Per Santri</h2>
-              <div style={{fontSize:11,color:"#64748b"}}>Tahun {thisYear()} — {santriDB.length} santri terdaftar</div>
+              <div style={{fontSize:11,color:"#64748b"}}>Tahun {thisYear()} — {santriDB.length} santri</div>
             </div>
 
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:9}}>
@@ -623,7 +708,7 @@ export default function AbsensiPesantren() {
               </select>
             </div>
 
-            <div style={{display:"flex",gap:5,marginBottom:12,flexWrap:"wrap"}}>
+            <div style={{display:"flex",gap:5,marginBottom:10,flexWrap:"wrap"}}>
               <span style={{fontSize:10,color:"#64748b",alignSelf:"center"}}>Urut:</span>
               {[["nama","A-Z"],["hadir","Hadir ↓"],["alpha","Alpha ↓"],["persen","% ↓"]].map(([val,label])=>(
                 <button key={val} onClick={()=>setSortBy(val)} style={{padding:"4px 10px",borderRadius:20,cursor:"pointer",fontSize:10,
@@ -633,10 +718,10 @@ export default function AbsensiPesantren() {
               ))}
             </div>
 
-            {/* Ringkasan */}
-            {(() => {
-              const tH = santriFiltered.reduce((a,s)=>a+s.stat.totalH,0);
-              const tA = santriFiltered.reduce((a,s)=>a+s.stat.totalA,0);
+            {/* Ringkasan total */}
+            {(()=>{
+              const tH=santriFiltered.reduce((a,s)=>a+s.stat.totalH,0);
+              const tA=santriFiltered.reduce((a,s)=>a+s.stat.totalA,0);
               return (
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:7,marginBottom:12}}>
                   {[{icon:"✅",label:"Total Hadir",val:tH,color:"#4ade80"},{icon:"❌",label:"Total Alpha",val:tA,color:"#f87171"},{icon:"📋",label:"Total Sesi",val:tH+tA,color:"#60a5fa"}].map((s,i)=>(
@@ -650,7 +735,6 @@ export default function AbsensiPesantren() {
               );
             })()}
 
-            {/* Tabel santri */}
             <div style={{...card,overflow:"hidden",marginBottom:12}}>
               <div style={{display:"grid",gridTemplateColumns:"1fr 55px 55px 55px 48px",padding:"8px 12px",borderBottom:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.03)"}}>
                 {["Nama Santri","Hadir","Alpha","Sesi","%"].map((h,i)=>(
@@ -658,15 +742,15 @@ export default function AbsensiPesantren() {
                 ))}
               </div>
               <div style={{maxHeight:360,overflowY:"auto"}}>
-                {santriFiltered.length === 0 ? (
-                  <div style={{padding:20,textAlign:"center",color:"#64748b",fontSize:12}}>Tidak ada data ditemukan</div>
-                ) : santriFiltered.map((s,i) => {
-                  const pc = s.stat.persen;
-                  const pcColor = pc>=80?"#4ade80":pc>=60?"#facc15":pc>0?"#f87171":"#475569";
+                {santriFiltered.length===0 ? (
+                  <div style={{padding:20,textAlign:"center",color:"#64748b",fontSize:12}}>Tidak ada data</div>
+                ) : santriFiltered.map((s,i)=>{
+                  const pc=s.stat.persen;
+                  const pcColor=pc>=80?"#4ade80":pc>=60?"#facc15":pc>0?"#f87171":"#475569";
                   return (
                     <div key={i} onClick={()=>setSelectedSantri(s)}
-                      style={{display:"grid",gridTemplateColumns:"1fr 55px 55px 55px 48px",padding:"9px 12px",
-                        borderBottom:"1px solid rgba(255,255,255,0.04)",cursor:"pointer",transition:"background 0.15s"}}
+                      style={{display:"grid",gridTemplateColumns:"1fr 55px 55px 55px 48px",
+                        padding:"9px 12px",borderBottom:"1px solid rgba(255,255,255,0.04)",cursor:"pointer"}}
                       onMouseEnter={e=>e.currentTarget.style.background="rgba(255,255,255,0.04)"}
                       onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
                       <div>
@@ -690,20 +774,18 @@ export default function AbsensiPesantren() {
           </div>
         )}
 
-        {/* DETAIL SANTRI */}
-        {screen === "tahunan" && selectedSantri && (() => {
-          const tahun = thisYear();
-          const data = rekapTahunan[selectedSantri.id]?.[tahun] || {};
-          const stat = getStatSantri(selectedSantri.id, tahun, filterKegiatan);
+        {/* ══ DETAIL SANTRI ══ */}
+        {screen==="tahunan" && selectedSantri && (()=>{
+          const tahun=thisYear();
+          const data=rekapTahunan[selectedSantri.id]?.[tahun]||{};
+          const stat=getStatSantri(selectedSantri.id,tahun,filterKegiatan);
           return (
             <div>
-              <button onClick={()=>setSelectedSantri(null)} style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",
-                borderRadius:8,color:"#94a3b8",padding:"5px 11px",cursor:"pointer",fontSize:11,marginBottom:14}}>← Kembali</button>
+              <button onClick={()=>setSelectedSantri(null)} style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:8,color:"#94a3b8",padding:"5px 11px",cursor:"pointer",fontSize:11,marginBottom:14}}>← Kembali</button>
 
               <div style={{...card,padding:16,marginBottom:14}}>
                 <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
-                  <div style={{width:48,height:48,borderRadius:"50%",background:"linear-gradient(135deg,#6366f1,#4f46e5)",
-                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0,color:"#fff",fontWeight:800}}>
+                  <div style={{width:48,height:48,borderRadius:"50%",background:"linear-gradient(135deg,#6366f1,#4f46e5)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,color:"#fff",fontWeight:800,flexShrink:0}}>
                     {selectedSantri.nama.charAt(0)}
                   </div>
                   <div>
@@ -712,51 +794,41 @@ export default function AbsensiPesantren() {
                     <div style={{fontSize:10,color:"#64748b",marginTop:1}}>Rekap Tahun {tahun}</div>
                   </div>
                 </div>
-
-                {/* 4 angka utama */}
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:12}}>
                   {[
                     {label:"Total Sesi",val:stat.total,color:"#94a3b8"},
                     {label:"Hadir",val:stat.totalH,color:"#4ade80"},
                     {label:"Alpha",val:stat.totalA,color:"#f87171"},
-                    {label:"Kehadiran",val:stat.total>0?`${stat.persen}%`:"-",
-                      color:stat.persen>=80?"#4ade80":stat.persen>=60?"#facc15":"#f87171"},
+                    {label:"Kehadiran",val:stat.total>0?`${stat.persen}%`:"-",color:stat.persen>=80?"#4ade80":stat.persen>=60?"#facc15":"#f87171"},
                   ].map((s,i)=>(
                     <div key={i} style={{textAlign:"center",background:"rgba(255,255,255,0.05)",borderRadius:9,padding:"9px 5px"}}>
-                      <div style={{fontSize:19,fontWeight:800,color:s.color}}>{s.val}</div>
+                      <div style={{fontSize:18,fontWeight:800,color:s.color}}>{s.val}</div>
                       <div style={{fontSize:9,color:"#64748b"}}>{s.label}</div>
                     </div>
                   ))}
                 </div>
-
-                {stat.total > 0 && (
+                {stat.total>0 && (
                   <div>
                     <div style={{height:7,background:"rgba(255,255,255,0.08)",borderRadius:4,overflow:"hidden"}}>
                       <div style={{height:"100%",borderRadius:4,width:`${stat.persen}%`,transition:"width 1s ease",
                         background:stat.persen>=80?"linear-gradient(90deg,#22c55e,#4ade80)":stat.persen>=60?"linear-gradient(90deg,#f59e0b,#facc15)":"linear-gradient(90deg,#ef4444,#f87171)"}}/>
                     </div>
-                    <div style={{fontSize:10,color:"#64748b",marginTop:3,textAlign:"right"}}>
-                      {stat.totalH}x hadir dari {stat.total}x total sesi
-                    </div>
+                    <div style={{fontSize:10,color:"#64748b",marginTop:3,textAlign:"right"}}>{stat.totalH}x hadir dari {stat.total}x sesi</div>
                   </div>
                 )}
               </div>
 
-              {/* Per kegiatan */}
-              {Object.keys(data).length > 0 ? (
+              {Object.keys(data).length>0 ? (
                 <div style={{...card,overflow:"hidden",marginBottom:12}}>
-                  <div style={{padding:"9px 13px",borderBottom:"1px solid rgba(255,255,255,0.07)",fontSize:11,color:"#94a3b8",fontWeight:600}}>
-                    📌 Rincian Per Kegiatan
-                  </div>
+                  <div style={{padding:"9px 13px",borderBottom:"1px solid rgba(255,255,255,0.07)",fontSize:11,color:"#94a3b8",fontWeight:600}}>📌 Rincian Per Kegiatan</div>
                   {Object.entries(data).map(([kg,val],i)=>{
-                    const tot = val.hadir+val.alpha;
-                    const pc = tot>0?Math.round(val.hadir/tot*100):0;
-                    const pcColor = pc>=80?"#4ade80":pc>=60?"#facc15":"#f87171";
+                    const tot=val.hadir+val.alpha;
+                    const pc=tot>0?Math.round(val.hadir/tot*100):0;
                     return (
                       <div key={i} style={{padding:"11px 13px",borderBottom:"1px solid rgba(255,255,255,0.04)"}}>
                         <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
                           <span style={{fontSize:12,color:"#f8fafc",fontWeight:600}}>{kg}</span>
-                          <span style={{fontSize:12,color:pcColor,fontWeight:700}}>{pc}%</span>
+                          <span style={{fontSize:12,color:pc>=80?"#4ade80":pc>=60?"#facc15":"#f87171",fontWeight:700}}>{pc}%</span>
                         </div>
                         <div style={{display:"flex",gap:14,marginBottom:5}}>
                           <span style={{fontSize:11,color:"#4ade80"}}>✅ Hadir: <strong>{val.hadir}x</strong></span>
@@ -773,25 +845,19 @@ export default function AbsensiPesantren() {
               ) : (
                 <div style={{...card,padding:20,textAlign:"center",marginBottom:12}}>
                   <div style={{fontSize:28,marginBottom:7}}>📭</div>
-                  <div style={{color:"#64748b",fontSize:12}}>Belum ada data absensi untuk santri ini.</div>
+                  <div style={{color:"#64748b",fontSize:12}}>Belum ada data untuk santri ini.</div>
                   <div style={{color:"#475569",fontSize:10,marginTop:3}}>Selesaikan sesi lalu klik "Simpan ke Rekap Tahunan".</div>
                 </div>
               )}
 
-              {/* Riwayat */}
               {Object.values(data).some(v=>v.riwayat?.length>0) && (
                 <div style={{...card,overflow:"hidden"}}>
-                  <div style={{padding:"9px 13px",borderBottom:"1px solid rgba(255,255,255,0.07)",fontSize:11,color:"#94a3b8",fontWeight:600}}>
-                    🕐 Riwayat Sesi Terakhir
-                  </div>
+                  <div style={{padding:"9px 13px",borderBottom:"1px solid rgba(255,255,255,0.07)",fontSize:11,color:"#94a3b8",fontWeight:600}}>🕐 Riwayat Sesi Terakhir</div>
                   <div style={{maxHeight:190,overflowY:"auto"}}>
                     {Object.entries(data).flatMap(([kg,val])=>(val.riwayat||[]).map(r=>({...r,kg})))
                       .slice(-15).reverse().map((r,i)=>(
                       <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"7px 13px",borderBottom:"1px solid rgba(255,255,255,0.03)",fontSize:11}}>
-                        <div>
-                          <span style={{color:"#f8fafc"}}>{r.kg}</span>
-                          <span style={{color:"#64748b",marginLeft:6}}>{r.tanggal}</span>
-                        </div>
+                        <div><span style={{color:"#f8fafc"}}>{r.kg}</span><span style={{color:"#64748b",marginLeft:6}}>{r.tanggal}</span></div>
                         <span style={{color:r.status==="hadir"?"#4ade80":"#f87171",fontWeight:600}}>
                           {r.status==="hadir"?`✅ ${r.waktu}`:"❌ Alpha"}
                         </span>
