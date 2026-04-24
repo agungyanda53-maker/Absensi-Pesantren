@@ -14,15 +14,24 @@ const parseCSV = (text) => {
   const lines = text.trim().split("\n");
   if (lines.length < 2) return [];
   const headers = lines[0].split(",").map(h => h.trim().replace(/\r/g,"").toLowerCase());
-  return lines.slice(1).map(line => {
+  return lines.slice(1).map((line, idx) => {
     const vals = line.split(",").map(v => v.trim().replace(/\r/g,""));
     const obj = {};
     headers.forEach((h, i) => obj[h] = vals[i] || "");
+
+    // Ambil nilai QR — cocokkan berbagai kemungkinan nama header
+    const qrRaw = obj["qr code"] || obj["qr_code"] || obj["kode qr"] || obj["qr"] || obj["kode"] || "";
+    // Normalisasi: uppercase semua, hapus spasi
+    const qrNorm = qrRaw.trim().toUpperCase();
+
+    // Buat ID otomatis jika tidak ada kolom id
+    const idRaw = obj.id || obj["id santri"] || obj["no"] || `STR-${String(idx+1).padStart(4,"0")}`;
+
     return {
-      id: obj.id || obj["id santri"] || `STR-${Math.random().toString(36).slice(2,7)}`,
+      id: idRaw.trim().toUpperCase(),
       nama: obj.nama || obj["nama santri"] || obj["name"] || "Tanpa Nama",
       kamar: obj.kamar || obj["kamar/kelas"] || obj["kelas"] || "-",
-      qr: obj.qr_code || obj["qr"] || obj["kode qr"] || obj.id || "",
+      qr: qrNorm,
     };
   }).filter(s => s.nama && s.nama !== "Tanpa Nama");
 };
@@ -284,12 +293,15 @@ export default function AbsensiPesantren() {
     lastDetected.current = val;
     lastDetectedTime.current = now;
 
+    // Normalisasi input: uppercase, hapus spasi
+    const valNorm = val.trim().toUpperCase();
+
     const santri = santriDB.find(s =>
-      s.qr.toUpperCase() === val || s.id.toUpperCase() === val
+      s.qr === valNorm || s.id === valNorm
     );
     if (!santri) {
       setFlash("err");
-      setLastScan({ nama: val, status: "Tidak Ditemukan ❌" });
+      setLastScan({ nama: valNorm, status: "Tidak Ditemukan ❌" });
       setTimeout(() => setFlash(null), 1500); return;
     }
     if (hadir[santri.id]) {
