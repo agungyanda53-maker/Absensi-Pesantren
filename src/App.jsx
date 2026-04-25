@@ -35,7 +35,8 @@ const SEMUA_KELAS = Array.from({length:6}, (_,i) =>
 // Kelas collosal: Kelas 1 s/d Kelas 6 (semua huruf)
 const SEMUA_TINGKAT = Array.from({length:6}, (_,i) => `Kelas ${i+1}`);
 
-const SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTz4nwmIBrVwUdYLRJB4jh37_abBx94j6YqcN_YKZS5Y54L5QmRhYWfsadh0YbXo1Al1Lhzz8S710yK/pub?gid=0&single=true&output=csv";
+const SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQQ2zrCTwqT10bNH9_ADjr6-ZnRRG01T3olR2CfMZhvt24bo-GboChSSxCLM1ZcMEL5IkxdnRAECVYh/pub?gid=1968039893&single=true&output=csv";
+const PROXY_URL = "https://api.allorigins.win/raw?url=";
 
 const parseCSV = (text) => {
   const lines = text.trim().split("\n").map(l => l.replace(/\r/g,""));
@@ -247,11 +248,18 @@ export default function AbsensiPesantren() {
   // ── Fetch Google Sheets ──
   const fetchSantri = () => {
     setDbStatus("loading");
-    fetch(SHEETS_CSV_URL)
-      .then(r => r.text())
+    // Coba langsung dulu, jika gagal pakai proxy
+    const tryFetch = (url) => fetch(url).then(r => {
+      if (!r.ok) throw new Error("not ok");
+      return r.text();
+    });
+
+    tryFetch(SHEETS_CSV_URL)
+      .catch(() => tryFetch(PROXY_URL + encodeURIComponent(SHEETS_CSV_URL)))
       .then(text => {
+        if (!text || text.trim().length === 0) throw new Error("empty");
         const parsed = parseCSV(text);
-        if (parsed.length === 0) { setDbStatus("error"); return; }
+        if (parsed.length === 0) throw new Error("no data");
         setSantriDB(parsed);
         setDbStatus("ok");
       })
