@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── Konstanta ─────────────────────────────────────────────────────────────
-const DURATION = 20 * 60;
+const DURATION = 15 * 60;
 
 const KEGIATAN = [
   "Sholat Subuh","Sholat Dzuhur","Sholat Ashar",
