@@ -38,16 +38,29 @@ const SEMUA_TINGKAT = Array.from({length:6}, (_,i) => `Kelas ${i+1}`);
 const SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTz4nwmIBrVwUdYLRJB4jh37_abBx94j6YqcN_YKZS5Y54L5QmRhYWfsadh0YbXo1Al1Lhzz8S710yK/pub?gid=0&single=true&output=csv";
 
 const parseCSV = (text) => {
-  const lines = text.trim().split("\n");
-  if (lines.length < 2) return [];
-  const headers = lines[0].split(",").map(h => h.trim().replace(/\r/g,"").toLowerCase());
-  return lines.slice(1).map((line, idx) => {
-    const vals = line.split(",").map(v => v.trim().replace(/\r/g,""));
+  const lines = text.trim().split("\n").map(l => l.replace(/\r/g,""));
+
+  // Cari baris header — cari baris yang mengandung kata 'Nama' atau 'nama'
+  let headerIdx = 0;
+  for (let i = 0; i < Math.min(lines.length, 10); i++) {
+    const lower = lines[i].toLowerCase();
+    if (lower.includes("nama") && (lower.includes("rayon") || lower.includes("kamar") || lower.includes("kelas") || lower.includes("qr"))) {
+      headerIdx = i;
+      break;
+    }
+  }
+
+  if (lines.length <= headerIdx + 1) return [];
+  const headers = lines[headerIdx].split(",").map(h => h.trim().toLowerCase());
+  const dataLines = lines.slice(headerIdx + 1).filter(l => l.trim() !== "" && !l.startsWith(",,,"));
+
+  return dataLines.map((line, idx) => {
+    const vals = line.split(",").map(v => v.trim());
     const obj = {};
     headers.forEach((h, i) => obj[h] = vals[i] || "");
     const qrRaw = obj["qr code"] || obj["qr_code"] || obj["kode qr"] || obj["qr"] || obj["kode"] || "";
     const qrNorm = qrRaw.trim().toUpperCase();
-    const idRaw = obj.id || obj["id santri"] || obj["no"] || `STR-${String(idx+1).padStart(4,"0")}`;
+    const idRaw = obj["id (opsional)"] || obj.id || obj["id santri"] || `STR-${String(idx+1).padStart(4,"0")}`;
     return {
       id: idRaw.trim().toUpperCase(),
       nama: obj.nama || obj["nama santri"] || obj["name"] || "Tanpa Nama",
@@ -56,7 +69,7 @@ const parseCSV = (text) => {
       kelas: obj.kelas || obj["kelas/tingkat"] || obj["tingkat"] || "-",
       qr: qrNorm,
     };
-  }).filter(s => s.nama && s.nama !== "Tanpa Nama");
+  }).filter(s => s.nama && s.nama !== "Tanpa Nama" && s.nama.trim() !== "");
 };
 
 // ─── Storage ──────────────────────────────────────────────────────────────
