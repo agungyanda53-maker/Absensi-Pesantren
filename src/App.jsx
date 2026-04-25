@@ -32,6 +32,9 @@ const SEMUA_KELAS = Array.from({length:6}, (_,i) =>
   HURUF.map(h => `Kelas ${i+1} ${h}`)
 ).flat();
 
+// Kelas collosal: Kelas 1 s/d Kelas 6 (semua huruf)
+const SEMUA_TINGKAT = Array.from({length:6}, (_,i) => `Kelas ${i+1}`);
+
 const SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRHyGfi-heXx4sC43HGtLFeWa9ahh-fh1eFPD6k5m-QD2b5M_mWQiSl-bJLkD0cx0MCpJ7mPy5uF8EB/pub?gid=0&single=true&output=csv";
 
 const parseCSV = (text) => {
@@ -202,6 +205,8 @@ export default function AbsensiPesantren() {
   const [filterRayon, setFilterRayon] = useState("");
   const [filterKamar, setFilterKamar] = useState("");
   const [filterKelas, setFilterKelas] = useState("");
+  const [filterTingkat, setFilterTingkat] = useState("");
+  const [suaraAktif, setSuaraAktif] = useState(true);
 
   const [timer, setTimer] = useState(DURATION);
   const [hadir, setHadir] = useState({});
@@ -260,14 +265,16 @@ export default function AbsensiPesantren() {
     if (filterMode === "rayon") return santriDB.filter(s => s.rayon === filterRayon);
     if (filterMode === "kamar") return santriDB.filter(s => String(s.kamar) === String(filterKamar) && s.rayon === filterRayon);
     if (filterMode === "kelas") return santriDB.filter(s => s.kelas === filterKelas);
+    if (filterMode === "tingkat") return santriDB.filter(s => s.kelas && s.kelas.startsWith(filterTingkat));
     return santriDB;
-  }, [santriDB, filterMode, filterRayon, filterKamar, filterKelas]);
+  }, [santriDB, filterMode, filterRayon, filterKamar, filterKelas, filterTingkat]);
 
   const labelSesi = () => {
     if (filterMode === "semua") return "Semua Santri";
     if (filterMode === "rayon") return `Rayon ${filterRayon}`;
     if (filterMode === "kamar") return `Kamar ${filterKamar} (${filterRayon})`;
     if (filterMode === "kelas") return filterKelas;
+    if (filterMode === "tingkat") return `${filterTingkat} (Semua Kelas)`;
     return "";
   };
 
@@ -277,6 +284,7 @@ export default function AbsensiPesantren() {
     if (filterMode === "kamar" && (!filterRayon || !filterKamar)) return;
     if (filterMode === "kelas" && !filterKelas) return;
     setHadir({}); setLogs([]); setTimer(DURATION); setLastScan(null);
+    lastDetected.current = ""; lastDetectedTime.current = 0;
     setScreen("sesi");
   };
 
@@ -285,8 +293,45 @@ export default function AbsensiPesantren() {
     if (filterMode === "rayon" && !filterRayon) return false;
     if (filterMode === "kamar" && (!filterRayon || !filterKamar)) return false;
     if (filterMode === "kelas" && !filterKelas) return false;
+    if (filterMode === "tingkat" && !filterTingkat) return false;
     return true;
   };
+
+  // ── Suara scan ──
+  const bunyiScan = useCallback((tipe) => {
+    if (!suaraAktif) return;
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      if (tipe === "ok") {
+        // Dua nada naik = berhasil
+        osc.frequency.setValueAtTime(600, ctx.currentTime);
+        osc.frequency.setValueAtTime(900, ctx.currentTime + 0.1);
+        gain.gain.setValueAtTime(0.3, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.25);
+      } else if (tipe === "dup") {
+        // Nada sedang = duplikat
+        osc.frequency.setValueAtTime(440, ctx.currentTime);
+        gain.gain.setValueAtTime(0.2, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.2);
+      } else {
+        // Nada turun = tidak ditemukan
+        osc.frequency.setValueAtTime(400, ctx.currentTime);
+        osc.frequency.setValueAtTime(200, ctx.currentTime + 0.1);
+        gain.gain.setValueAtTime(0.3, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.3);
+      }
+    } catch(e) {}
+  }, [suaraAktif]);
 
   // ── Proses QR ──
   const prosesKode = useCallback((val) => {
@@ -300,14 +345,15 @@ export default function AbsensiPesantren() {
     const santri = target.find(s => s.qr === valNorm || s.id === valNorm);
 
     if (!santri) {
-      // Cek apakah ada di DB tapi beda filter
       const adaDiDB = santriDB.find(s => s.qr === valNorm || s.id === valNorm);
       setFlash("err");
+      bunyiScan("err");
       setLastScan({ nama: valNorm, status: adaDiDB ? `Bukan bagian dari ${labelSesi()} ⚠️` : "Tidak Ditemukan ❌" });
       setTimeout(() => setFlash(null), 1500); return;
     }
     if (hadir[santri.id]) {
       setFlash("dup");
+      bunyiScan("dup");
       setLastScan({ nama: santri.nama, status: "Sudah Absen ⚠️" });
       setTimeout(() => setFlash(null), 1500); return;
     }
@@ -315,9 +361,10 @@ export default function AbsensiPesantren() {
     setHadir(prev => ({ ...prev, [santri.id]: waktu }));
     setLogs(prev => [{ ...santri, waktu }, ...prev]);
     setFlash("ok");
+    bunyiScan("ok");
     setLastScan({ nama: santri.nama, status: `Hadir ✅ — ${waktu}` });
     setTimeout(() => setFlash(null), 1500);
-  }, [santriDB, santriSesi, hadir, filterMode, filterRayon, filterKamar, filterKelas]);
+  }, [santriDB, santriSesi, hadir, filterMode, filterRayon, filterKamar, filterKelas, bunyiScan]);
 
   const handleManualInput = (e) => {
     if (e.key !== "Enter") return;
@@ -519,9 +566,10 @@ export default function AbsensiPesantren() {
                   {val:"semua",icon:"👥",label:"Semua Santri"},
                   {val:"rayon",icon:"🏠",label:"Per Rayon"},
                   {val:"kamar",icon:"🚪",label:"Per Kamar"},
+                  {val:"tingkat",icon:"🎓",label:"Per Tingkat"},
                   {val:"kelas",icon:"📚",label:"Per Kelas"},
                 ].map(opt=>(
-                  <button key={opt.val} onClick={()=>{setFilterMode(opt.val);setFilterRayon("");setFilterKamar("");setFilterKelas("");}} style={{
+                  <button key={opt.val} onClick={()=>{setFilterMode(opt.val);setFilterRayon("");setFilterKamar("");setFilterKelas("");setFilterTingkat("");}} style={{
                     padding:"12px 10px",borderRadius:10,cursor:"pointer",textAlign:"center",
                     background:filterMode===opt.val?"linear-gradient(135deg,#6366f1,#4f46e5)":"rgba(255,255,255,0.04)",
                     border:filterMode===opt.val?"2px solid #6366f1":"1px solid rgba(255,255,255,0.08)",
@@ -556,6 +604,29 @@ export default function AbsensiPesantren() {
                       </option>
                     ))}
                   </select>
+                </div>
+              )}
+
+              {/* Sub-filter Tingkat (Collosal) */}
+              {filterMode==="tingkat" && (
+                <div style={{marginBottom:8}}>
+                  <label style={{fontSize:11,color:"#64748b",display:"block",marginBottom:5}}>Pilih Tingkat (absen semua kelas A-F sekaligus)</label>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7}}>
+                    {SEMUA_TINGKAT.map(t=>(
+                      <button key={t} onClick={()=>setFilterTingkat(t)} style={{
+                        padding:"12px 8px",borderRadius:9,cursor:"pointer",textAlign:"center",
+                        background:filterTingkat===t?"linear-gradient(135deg,#f59e0b,#d97706)":"rgba(255,255,255,0.04)",
+                        border:filterTingkat===t?"2px solid #f59e0b":"1px solid rgba(255,255,255,0.08)",
+                        color:filterTingkat===t?"#fff":"#cbd5e1",
+                      }}>
+                        <div style={{fontSize:18,marginBottom:2}}>🎓</div>
+                        <div style={{fontSize:12,fontWeight:filterTingkat===t?700:400}}>{t}</div>
+                        <div style={{fontSize:9,color:filterTingkat===t?"rgba(255,255,255,0.8)":"#64748b",marginTop:1}}>
+                          {santriDB.filter(s=>s.kelas&&s.kelas.startsWith(t)).length} santri
+                        </div>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
 
@@ -603,7 +674,17 @@ export default function AbsensiPesantren() {
           <div>
             {/* Timer */}
             <div style={{textAlign:"center",marginBottom:14}}>
-              <div style={{fontSize:10,color:"#64748b",marginBottom:1,letterSpacing:1,textTransform:"uppercase"}}>{kegiatan}</div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                <div style={{fontSize:10,color:"#64748b",letterSpacing:1,textTransform:"uppercase"}}>{kegiatan}</div>
+                <button onClick={()=>setSuaraAktif(v=>!v)} title="Toggle suara scan" style={{
+                  padding:"4px 10px",borderRadius:20,cursor:"pointer",fontSize:11,
+                  background:suaraAktif?"rgba(34,197,94,0.15)":"rgba(255,255,255,0.05)",
+                  border:suaraAktif?"1px solid rgba(34,197,94,0.4)":"1px solid rgba(255,255,255,0.1)",
+                  color:suaraAktif?"#4ade80":"#64748b",
+                }}>
+                  {suaraAktif ? "🔊 Suara ON" : "🔇 Suara OFF"}
+                </button>
+              </div>
               <div style={{fontSize:11,color:"#6366f1",marginBottom:3,fontWeight:600}}>{labelSesi()}</div>
               <div style={{position:"relative",display:"inline-block"}}>
                 <svg width="110" height="110" style={{transform:"rotate(-90deg)"}}>
@@ -705,7 +786,7 @@ export default function AbsensiPesantren() {
             </div>
 
             <button onClick={()=>setScreen("tahunan")} style={{width:"100%",padding:"10px",marginBottom:6,background:"rgba(99,102,241,0.1)",border:"1px solid rgba(99,102,241,0.3)",borderRadius:9,color:"#a5b4fc",fontSize:12,fontWeight:600,cursor:"pointer"}}>📊 Lihat Rekap Tahunan →</button>
-            <button onClick={()=>{setScreen("home");setKegiatan("");setFilterMode("semua");setFilterRayon("");setFilterKamar("");setFilterKelas("");}} style={{width:"100%",padding:"9px",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:9,color:"#94a3b8",fontSize:12,cursor:"pointer"}}>🔄 Sesi Baru</button>
+            <button onClick={()=>{setScreen("home");setKegiatan("");setFilterMode("semua");setFilterRayon("");setFilterKamar("");setFilterKelas("");setFilterTingkat("");}} style={{width:"100%",padding:"9px",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:9,color:"#94a3b8",fontSize:12,cursor:"pointer"}}>🔄 Sesi Baru</button>
           </div>
         )}
 
