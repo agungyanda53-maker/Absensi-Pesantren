@@ -35,7 +35,7 @@ const SEMUA_KELAS = Array.from({length:6}, (_,i) =>
 // Kelas collosal: Kelas 1 s/d Kelas 6 (semua huruf)
 const SEMUA_TINGKAT = Array.from({length:6}, (_,i) => `Kelas ${i+1}`);
 
-const SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRHyGfi-heXx4sC43HGtLFeWa9ahh-fh1eFPD6k5m-QD2b5M_mWQiSl-bJLkD0cx0MCpJ7mPy5uF8EB/pub?gid=0&single=true&output=csv";
+const SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQK8O0PvkAvLbI7rbDgmvt-BvaX2kf-1sf4Z7pKsX9vVtH8IQUXI4XAt0EwRGz80Q/pub?gid=1445894765&single=true&output=csv";
 
 const parseCSV = (text) => {
   const lines = text.trim().split("\n");
