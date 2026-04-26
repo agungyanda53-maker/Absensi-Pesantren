@@ -97,14 +97,20 @@ function QRScanner({ onDetected }) {
   const animRef = useRef(null);
   const [status, setStatus] = useState("idle");
   const [errMsg, setErrMsg] = useState("");
+  const [facingMode, setFacingMode] = useState("environment"); // environment=belakang, user=depan
   const lastCode = useRef("");
   const lastCodeTime = useRef(0);
 
-  const startCamera = async () => {
+  const startCamera = async (mode) => {
+    // Stop kamera sebelumnya jika ada
+    if (animRef.current) cancelAnimationFrame(animRef.current);
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t=>t.stop()); streamRef.current=null; }
+
     setStatus("loading"); setErrMsg("");
+    const fm = mode || facingMode;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal:"environment" }, width:{ideal:1280}, height:{ideal:720} }
+        video: { facingMode: { ideal: fm }, width:{ideal:1280}, height:{ideal:720} }
       });
       streamRef.current = stream;
       if (videoRef.current) {
@@ -116,10 +122,16 @@ function QRScanner({ onDetected }) {
     } catch(err) {
       let msg = "Tidak dapat membuka kamera.";
       if (err.name==="NotAllowedError") msg = "Izin kamera ditolak. Klik ikon kunci di address bar lalu izinkan kamera.";
-      else if (err.name==="NotFoundError") msg = "Kamera tidak ditemukan.";
+      else if (err.name==="NotFoundError") msg = "Kamera tidak ditemukan di perangkat ini.";
       else if (err.name==="NotReadableError") msg = "Kamera digunakan aplikasi lain. Tutup lalu coba lagi.";
       setErrMsg(msg); setStatus("error");
     }
+  };
+
+  const switchCamera = async () => {
+    const newMode = facingMode === "environment" ? "user" : "environment";
+    setFacingMode(newMode);
+    await startCamera(newMode);
   };
 
   const scanLoop = () => {
@@ -163,8 +175,12 @@ function QRScanner({ onDetected }) {
   return (
     <div style={{width:"100%"}}>
       <div style={{position:"relative",width:"100%",aspectRatio:"4/3",background:"#000",borderRadius:12,overflow:"hidden",marginBottom:10,border:"2px solid rgba(255,255,255,0.08)"}}>
-        <video ref={videoRef} playsInline autoPlay muted style={{width:"100%",height:"100%",objectFit:"cover",display:status==="active"?"block":"none"}}/>
+        <video ref={videoRef} playsInline autoPlay muted
+          style={{width:"100%",height:"100%",objectFit:"cover",display:status==="active"?"block":"none",
+            transform: facingMode==="user" ? "scaleX(-1)" : "none"}}/>
         <canvas ref={canvasRef} style={{display:"none"}}/>
+
+        {/* Garis pemandu */}
         {status==="active" && (
           <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
             <div style={{position:"relative",width:200,height:200}}>
@@ -177,17 +193,49 @@ function QRScanner({ onDetected }) {
             </div>
           </div>
         )}
+
+        {/* Label kamera aktif */}
+        {status==="active" && (
+          <div style={{position:"absolute",top:10,left:10,background:"rgba(0,0,0,0.5)",borderRadius:20,padding:"4px 10px",fontSize:10,color:"#fff",backdropFilter:"blur(4px)"}}>
+            {facingMode==="environment" ? "📷 Kamera Belakang" : "🤳 Kamera Depan"}
+          </div>
+        )}
+
+        {/* Tombol switch kamera (saat aktif) */}
+        {status==="active" && (
+          <button onClick={switchCamera} style={{
+            position:"absolute",top:8,right:8,
+            background:"rgba(0,0,0,0.5)",border:"1px solid rgba(255,255,255,0.2)",
+            borderRadius:"50%",width:40,height:40,cursor:"pointer",
+            display:"flex",alignItems:"center",justifyContent:"center",
+            fontSize:18,backdropFilter:"blur(4px)",
+            transition:"background 0.2s",
+          }}
+          title="Ganti kamera"
+          onMouseEnter={e=>e.currentTarget.style.background="rgba(99,102,241,0.6)"}
+          onMouseLeave={e=>e.currentTarget.style.background="rgba(0,0,0,0.5)"}>
+            🔄
+          </button>
+        )}
+
+        {/* Placeholder idle */}
         {status==="idle" && (
-          <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
-            <div style={{fontSize:44,marginBottom:8}}>📷</div>
+          <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:8}}>
+            <div style={{fontSize:44}}>📷</div>
             <div style={{color:"#475569",fontSize:12}}>Kamera belum aktif</div>
+            <div style={{display:"flex",gap:8,marginTop:4}}>
+              <div style={{fontSize:10,color:"#334155",background:"rgba(255,255,255,0.05)",padding:"4px 10px",borderRadius:20,border:"1px solid rgba(255,255,255,0.08)"}}>📷 Belakang</div>
+              <div style={{fontSize:10,color:"#334155",background:"rgba(255,255,255,0.05)",padding:"4px 10px",borderRadius:20,border:"1px solid rgba(255,255,255,0.08)"}}>🤳 Depan</div>
+            </div>
           </div>
         )}
+
         {status==="loading" && (
-          <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-            <div style={{fontSize:13,color:"#94a3b8"}}>⏳ Membuka kamera...</div>
+          <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:6}}>
+            <div style={{fontSize:13,color:"#94a3b8"}}>⏳ Membuka kamera {facingMode==="environment"?"belakang":"depan"}...</div>
           </div>
         )}
+
         {status==="error" && (
           <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:20}}>
             <div style={{fontSize:28,marginBottom:8}}>⚠️</div>
@@ -195,16 +243,49 @@ function QRScanner({ onDetected }) {
           </div>
         )}
       </div>
-      {status!=="active" ? (
-        <button onClick={startCamera} style={{width:"100%",padding:"12px",background:"linear-gradient(135deg,#22c55e,#16a34a)",border:"none",borderRadius:10,color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer",boxShadow:"0 4px 14px rgba(34,197,94,0.3)",marginBottom:8}}>
-          {status==="loading"?"⏳ Membuka kamera...":"📷 Buka Kamera & Scan QR"}
-        </button>
+
+      {/* Tombol buka/tutup kamera */}
+      {status !== "active" ? (
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+          <button onClick={()=>{setFacingMode("environment");startCamera("environment");}} style={{
+            padding:"12px 8px",background:"linear-gradient(135deg,#22c55e,#16a34a)",
+            border:"none",borderRadius:10,color:"#fff",fontSize:12,fontWeight:700,
+            cursor:"pointer",boxShadow:"0 4px 14px rgba(34,197,94,0.3)",
+          }}>
+            📷 Kamera Belakang
+          </button>
+          <button onClick={()=>{setFacingMode("user");startCamera("user");}} style={{
+            padding:"12px 8px",background:"linear-gradient(135deg,#6366f1,#4f46e5)",
+            border:"none",borderRadius:10,color:"#fff",fontSize:12,fontWeight:700,
+            cursor:"pointer",boxShadow:"0 4px 14px rgba(99,102,241,0.3)",
+          }}>
+            🤳 Kamera Depan
+          </button>
+        </div>
       ) : (
-        <button onClick={stopCamera} style={{width:"100%",padding:"11px",background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:10,color:"#f87171",fontSize:12,fontWeight:600,cursor:"pointer",marginBottom:8}}>
-          ⏸ Tutup Kamera
-        </button>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+          <button onClick={stopCamera} style={{
+            padding:"11px",background:"rgba(239,68,68,0.15)",
+            border:"1px solid rgba(239,68,68,0.3)",borderRadius:10,
+            color:"#f87171",fontSize:12,fontWeight:600,cursor:"pointer",
+          }}>
+            ⏸ Tutup Kamera
+          </button>
+          <button onClick={switchCamera} style={{
+            padding:"11px",background:"rgba(99,102,241,0.15)",
+            border:"1px solid rgba(99,102,241,0.3)",borderRadius:10,
+            color:"#a5b4fc",fontSize:12,fontWeight:600,cursor:"pointer",
+          }}>
+            🔄 Ganti ke {facingMode==="environment"?"Depan 🤳":"Belakang 📷"}
+          </button>
+        </div>
       )}
-      {status==="idle" && <div style={{fontSize:10,color:"#475569",textAlign:"center",marginBottom:4}}>💡 Gunakan Chrome / Safari & izinkan akses kamera</div>}
+
+      {status==="idle" && (
+        <div style={{fontSize:10,color:"#475569",textAlign:"center",marginBottom:4}}>
+          💡 Gunakan <strong style={{color:"#94a3b8"}}>Chrome / Safari</strong> & izinkan akses kamera
+        </div>
+      )}
     </div>
   );
 }
@@ -248,22 +329,32 @@ export default function AbsensiPesantren() {
   // ── Fetch Google Sheets ──
   const fetchSantri = () => {
     setDbStatus("loading");
-    // Coba langsung dulu, jika gagal pakai proxy
-    const tryFetch = (url) => fetch(url).then(r => {
-      if (!r.ok) throw new Error("not ok");
-      return r.text();
-    });
 
-    tryFetch(SHEETS_CSV_URL)
-      .catch(() => tryFetch(PROXY_URL + encodeURIComponent(SHEETS_CSV_URL)))
-      .then(text => {
-        if (!text || text.trim().length === 0) throw new Error("empty");
-        const parsed = parseCSV(text);
-        if (parsed.length === 0) throw new Error("no data");
-        setSantriDB(parsed);
-        setDbStatus("ok");
-      })
-      .catch(() => setDbStatus("error"));
+    const PROXIES = [
+      "",
+      "https://corsproxy.io/?",
+      "https://api.allorigins.win/raw?url=",
+      "https://api.codetabs.com/v1/proxy?quest=",
+    ];
+
+    const tryNext = (i) => {
+      if (i >= PROXIES.length) { setDbStatus("error"); return; }
+      const url = i === 0
+        ? SHEETS_CSV_URL
+        : PROXIES[i] + encodeURIComponent(SHEETS_CSV_URL);
+      fetch(url)
+        .then(r => { if (!r.ok) throw new Error("not ok"); return r.text(); })
+        .then(text => {
+          if (!text || text.trim().length < 10) throw new Error("empty");
+          const parsed = parseCSV(text);
+          if (parsed.length === 0) throw new Error("no rows");
+          setSantriDB(parsed);
+          setDbStatus("ok");
+        })
+        .catch(() => tryNext(i + 1));
+    };
+
+    tryNext(0);
   };
 
   useEffect(() => { fetchSantri(); }, []);
